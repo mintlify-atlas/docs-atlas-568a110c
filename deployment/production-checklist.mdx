@@ -1,0 +1,155 @@
+---
+title: "Production Deployment Checklist for NISIRA Assistant"
+sidebarTitle: "Checklist"
+description: "Verify every critical configuration step before going live: secrets, database, embeddings, SSL, CORS, health checks, and monitoring."
+---
+
+Before directing real traffic to your NISIRA Assistant deployment, work through every section below. Each accordion covers one configuration category. A missed item in Security or Database is the most common cause of production incidents, so start there and work your way down. Items are phrased as actionable checkboxes — mark them off as you confirm each one.
+
+<Warning>
+  **Never commit `.env.production`, `credentials.json`, or any file containing secrets to Git.** Verify with `git status` and `git log --oneline` before every push. Add sensitive files to `.gitignore` and consider running `git secrets` or a pre-commit hook to catch accidental leaks.
+</Warning>
+
+---
+
+<Accordion title="1 · Security">
+  Hardening Django's security settings is the first step before exposing the application to the internet.
+
+  - [ ] `SECRET_KEY` is set to a unique, cryptographically random value (minimum 50 characters). Generate one with:
+    ```bash
+    python3 -c "import secrets; print(secrets.token_urlsafe(50))"
+    ```
+  - [ ] `DEBUG=False` — this **must** be `False` in production. Leaving it `True` exposes stack traces and internal configuration to any visitor.
+  - [ ] `ALLOWED_HOSTS` lists only your actual domain(s) and/or Droplet IP, e.g. `your-domain.com,www.your-domain.com`. Wildcard (`*`) is not acceptable in production.
+  - [ ] `SECURE_SSL_REDIRECT=True` — Django redirects all HTTP requests to HTTPS. Enable only **after** the SSL certificate is installed.
+  - [ ] `SESSION_COOKIE_SECURE=True` — the session cookie is sent only over HTTPS.
+  - [ ] `CSRF_COOKIE_SECURE=True` — the CSRF cookie is sent only over HTTPS.
+  - [ ] `DJANGO_SETTINGS_MODULE=core.production_settings` — the production settings module is active.
+  - [ ] `.env.production` and `credentials.json` are listed in `.gitignore` and are **not** present in any Git commit.
+</Accordion>
+
+<Accordion title="2 · Database">
+  NISIRA Assistant requires PostgreSQL with the `pgvector` extension for storing vector embeddings. The default MySQL development database is not supported in production.
+
+  - [ ] `DATABASE_URL` is set and points to a PostgreSQL 16 instance (e.g. `postgresql://user:pass@host:5432/rag_asistente`). On DigitalOcean App Platform, use the `${db.DATABASE_URL}` binding.
+  - [ ] `DB_PASSWORD` is a strong, unique password — not the default `sistemas` from the development config.
+  - [ ] The `pgvector` extension is available. The `pgvector/pgvector:pg16` image used in `docker-compose.production.yml` includes it automatically. For managed databases, verify with:
+    ```bash
+    docker compose -f docker-compose.production.yml exec db \
+      psql -U postgres -c "SELECT * FROM pg_extension WHERE extname = 'vector';"
+    ```
+  - [ ] All Django migrations have been applied:
+    ```bash
+    docker compose -f docker-compose.production.yml exec backend \
+      python manage.py migrate --check
+    ```
+  - [ ] There are no unapplied migrations (`--check` exits `0`).
+  - [ ] A database backup strategy is in place (cron job, DigitalOcean managed backup, or equivalent).
+</Accordion>
+
+<Accordion title="3 · LLM & API Keys">
+  The backend requires at least one LLM provider key to answer chat queries. Without a valid key the chat endpoint will return errors for every message.
+
+  - [ ] At least one of the following LLM provider keys is set and valid:
+    - `OPENROUTER_API_KEY` — used when `LLM_PROVIDER=openrouter`
+    - `GOOGLE_API_KEY` — used when `LLM_PROVIDER=gemini`
+    - `GROQ_API_KEY` — used when `LLM_PROVIDER=groq`
+  - [ ] `LLM_PROVIDER` is set to the provider whose key you have configured (`openrouter`, `gemini`, or `groq`).
+  - [ ] `GOOGLE_API_KEY` is set if you want to use Google's embedding model. The default embedding model (`sentence-transformers/all-mpnet-base-v2`) does not require a key, but Google embeddings may offer better quality for Spanish-language documents.
+  - [ ] API keys have been tested independently before deployment (e.g. with a `curl` call to the provider's API) to confirm they are active and have sufficient quota.
+</Accordion>
+
+<Accordion title="4 · RAG Initialization">
+  The retrieval-augmented generation (RAG) system must be initialized after the first deployment so that document embeddings are generated and stored in ChromaDB.
+
+  - [ ] `INIT_RAG` is set to `"false"` in `docker-compose.production.yml` (this is the default). The RAG system is initialized on-demand via the API, not automatically at startup, to avoid long container start times.
+  - [ ] After the backend is healthy, initialize the RAG system:
+    ```bash
+    curl -X POST https://your-domain.com/api/rag/initialize/ \
+      -H "Authorization: Bearer <your-token>"
+    ```
+  - [ ] The RAG status endpoint confirms the system is ready:
+    ```bash
+    curl https://your-domain.com/api/rag/status/
+    ```
+  - [ ] Documents in `./backend/data/documents` (or the `rag_data` volume) have been synced and processed.
+  - [ ] The `chroma_data` volume is persistent (defined as a named volume in `docker-compose.production.yml`) so embeddings survive container restarts.
+</Accordion>
+
+<Accordion title="5 · Google Drive (Optional)">
+  Google Drive integration allows the backend to automatically sync documents from a shared Drive folder. This section only applies if you are enabling Drive sync.
+
+  - [ ] `ENABLE_GOOGLE_DRIVE=true` is set.
+  - [ ] `GOOGLE_DRIVE_FOLDER_ID` is set to the ID of your shared Google Drive folder.
+  - [ ] `credentials.json` is present in the backend container (mounted via the `credentials` volume) **or** `GOOGLE_CREDENTIALS_JSON` is set as an environment variable containing the full JSON content of the service account credentials.
+  - [ ] The `credentials.json` file has restrictive permissions (`chmod 600`) on the host.
+  - [ ] The Google Drive API is enabled in the Google Cloud project associated with the service account.
+  - [ ] The service account has **Viewer** access to the target Drive folder.
+
+  <Note>
+    If Google Drive is not needed, leave `ENABLE_GOOGLE_DRIVE` unset or set to `false`. The backend will skip Drive-related startup checks and avoid noisy authentication logs.
+  </Note>
+</Accordion>
+
+<Accordion title="6 · Frontend">
+  The React frontend must be built against the correct backend URL. A mismatch here results in CORS errors and a non-functional chat interface.
+
+  - [ ] `REACT_APP_API_URL` is set to the production backend's base URL (e.g. `https://your-domain.com` or `https://<your-app>.ondigitalocean.app`). No trailing slash.
+  - [ ] The frontend Docker build completes without errors (`npm run build` exits `0`).
+  - [ ] The compiled frontend serves the correct API URL — verify in the browser's **Network** tab that XHR requests go to the expected backend host.
+  - [ ] `GENERATE_SOURCEMAP=false` is set to prevent exposing source maps in production builds.
+  - [ ] The login, registration, and chat flows work end-to-end after deployment.
+</Accordion>
+
+<Accordion title="7 · Health Checks">
+  Container orchestration and load balancers rely on health checks to determine whether a service is ready to receive traffic.
+
+  - [ ] The backend `/api/health/` endpoint returns `HTTP 200`. This is the health check path configured in both `docker-compose.production.yml` and DigitalOcean App Platform.
+    ```bash
+    curl -o /dev/null -s -w "%{http_code}\n" https://your-domain.com/api/health/
+    # Expected: 200
+    ```
+  - [ ] All Docker Compose services report `healthy` in `docker compose ps`.
+  - [ ] The frontend responds at the root path (`/`) with `HTTP 200`.
+  - [ ] Health check intervals are appropriate: the `backend/Dockerfile` uses `--interval=30s --timeout=10s --start-period=40s --retries=3`.
+</Accordion>
+
+<Accordion title="8 · Gunicorn">
+  Gunicorn is the production WSGI server. Under-sizing workers leads to request queuing; over-sizing wastes memory on small Droplets.
+
+  - [ ] `GUNICORN_WORKERS` is set. The general formula is `(2 × CPU cores) + 1`. On the DigitalOcean $24/month plan (2 vCPUs), `4` or `5` workers is appropriate. For App Platform Basic ($5/month, shared CPU), use `2`.
+  - [ ] `GUNICORN_TIMEOUT` is set to `300`. RAG queries and document embedding can be long-running; a 30-second default timeout will cause silent failures.
+  - [ ] Gunicorn is binding on `0.0.0.0:${PORT}` (not `127.0.0.1`) so the container's port is reachable from Nginx or the App Platform router.
+  - [ ] Worker recycling (`--max-requests` / `--max-requests-jitter`) is considered for long-running deployments to prevent gradual memory growth.
+</Accordion>
+
+<Accordion title="9 · CORS">
+  Cross-Origin Resource Sharing must be locked down so that only the trusted frontend domain can make authenticated API requests from a browser.
+
+  - [ ] `CORS_ALLOWED_ORIGINS` lists only the production frontend domain(s), e.g.:
+    ```bash
+    CORS_ALLOWED_ORIGINS=https://your-frontend.herokuapp.com,https://your-domain.com
+    ```
+  - [ ] `CORS_ALLOWED_ORIGINS` does **not** contain `*` (wildcard) in production.
+  - [ ] The frontend URL in `CORS_ALLOWED_ORIGINS` exactly matches the `Origin` header sent by the browser (scheme + hostname + port, no trailing slash).
+  - [ ] After deployment, confirm CORS is working by checking that a login request from the frontend does not produce a `CORS policy` browser error.
+</Accordion>
+
+<Accordion title="10 · Monitoring">
+  Basic observability allows you to detect and diagnose issues before users report them.
+
+  - [ ] Container logs are accessible and being reviewed. On Docker Compose:
+    ```bash
+    docker compose -f docker-compose.production.yml logs -f backend
+    ```
+    On DigitalOcean App Platform: **Runtime Logs** tab in the dashboard.
+  - [ ] `/api/admin/metrics/` is responding correctly for admin users and returns expected system metrics.
+  - [ ] `docker stats` (or equivalent) shows reasonable CPU and memory usage — no containers pinned at 100% CPU.
+  - [ ] A database backup cron job is scheduled and has been tested with a manual run:
+    ```bash
+    docker compose -f docker-compose.production.yml exec -T db \
+      pg_dump -U postgres rag_asistente > /backups/db_manual_test.sql
+    ```
+  - [ ] Log rotation or an external log aggregator is configured to prevent disk exhaustion on long-running Droplets.
+  - [ ] An uptime monitor (e.g. DigitalOcean Uptime, Better Uptime) is pointed at `/api/health/` with an alert sent to your email or Slack on failure.
+</Accordion>

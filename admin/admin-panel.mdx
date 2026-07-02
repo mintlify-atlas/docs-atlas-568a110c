@@ -1,0 +1,93 @@
+---
+title: "NISIRA Admin Panel: Document and System Management"
+sidebarTitle: "Admin Panel"
+description: "The React admin panel at /admin provides tabs for Google Drive files, embeddings management, system metrics, query history, and RAG pipeline controls."
+---
+
+The NISIRA Admin Panel is a React single-page application that gives the `admin` user full control over the document corpus, embedding pipeline, and system observability. Navigate to `/admin` in your browser after logging in — the app automatically redirects users whose username is `admin` to this panel, while all other users land in the chat interface. Non-admin users who attempt to access `/admin` directly are blocked by the `ProtectedRoute` component configured with `adminOnly=true`.
+
+## Accessing the panel
+
+<Steps>
+  <Step title="Log in as admin">
+    Use the credentials for the `admin` account. To create the admin user for the first time, run the following management command in your backend environment:
+
+    ```bash
+    python manage.py create_admin_user
+    ```
+  </Step>
+  <Step title="Navigate to /admin">
+    After a successful login the React SPA detects `username === 'admin'` and redirects you to `/admin/drive` (the default tab). The URL segment after `/admin/` reflects the active tab, so you can deep-link directly to any tab.
+  </Step>
+  <Step title="Explore the tabs">
+    Use the navigation bar at the top of the panel to switch between the five functional areas described below.
+  </Step>
+</Steps>
+
+<Note>
+  The Django built-in admin interface is available separately at `/django-admin/`. Use it for low-level model inspection, bulk operations, and direct database access outside the scope of the React panel.
+</Note>
+
+## Tab structure
+
+### Google Drive tab
+
+The **Google Drive** tab (`/admin/drive`) is the entry point for corpus management. From here you can:
+
+- **List files** — browse all documents in the configured Drive folder with pagination and a real-time name search. File cards show MIME type, size, and last-modified date.
+- **Upload documents** — drag-and-drop or file-picker upload. Accepted formats are `.pdf`, `.txt`, `.md`, `.doc`, and `.docx` (up to 50 MB). After a successful upload the file is saved both to Google Drive and to local storage; embedding generation starts automatically in a background thread.
+- **Delete a file** — remove a document from Drive via the trash icon on each file card.
+- **Trigger sync** — pull all new files from the configured Drive folder into local storage. Sync runs in a background thread so the panel stays responsive; a live progress bar and a scrollable log stream show current status. When sync downloads new files it automatically kicks off embedding generation for them.
+
+### Embeddings tab
+
+The **Embeddings** tab (`/admin/embeddings`) controls the vector index. Stat cards across the top display collection count, total chunk count, the embedding model (`all-mpnet-base-v2`), the index type (HNSW, m=32, ef=200), and table size in PostgreSQL. Actions available:
+
+- **Generate** — process all unprocessed documents and write their vectors to the pgvector store. Generation runs in a background thread; a progress bar and log stream update every 1.5 seconds via client-side polling.
+- **Verify** — run an integrity check across all indexed collections.
+- **Clear** — delete every embedding in the vector store. Use with caution — this removes all retrieval capability until embeddings are regenerated.
+- **View indexed documents** — open a list of every file that has embeddings, showing chunk counts. Files that exist in the index but are no longer present in Drive are highlighted as orphans and can be deleted individually.
+- **Delete a single document's embeddings** — remove only the vectors for a specific file, allowing you to force a re-embed on the next generation run.
+
+### Metrics tab
+
+The **Metrics** tab (`/admin/metrics`) surfaces aggregated performance and quality data collected automatically with each chat query:
+
+- **Summary view** — stat cards for average total latency (seconds), token generation speed (tokens/second), RAGAS quality score, and total query count.
+- **Queries view** — paginated list of individual queries; click any row to open a detail panel that explains exactly how each metric was calculated for that query, including Precision@k, Recall@k, Faithfulness, Hallucination Rate, and Answer Relevancy.
+
+### Ratings tab
+
+The **Ratings** tab (`/admin/ratings`) aggregates the like/dislike feedback that users submit from the chat interface. It shows total ratings, a percentage distribution bar, the most-reported issue tags, and a list of the eight most recent individual ratings with their user, message preview, and date.
+
+### Pipeline tab
+
+The **Pipeline** tab (`/admin/pipeline`) shows the operational state of all four RAG subsystems — Google Drive sync, Embeddings model, Vector Store, and Pipeline orchestrator — as a grid of status cards. An overall badge indicates `Operational` (all components up) or `Degraded` (at least one component down). A separate info panel lists the full tech stack and retrieval configuration (hybrid semantic+lexical, 60/40 weighting, adaptive Top-K of 3–10 documents).
+
+## Admin API endpoints
+
+All endpoints below are mounted under `/api/` and require a valid admin JWT in the `Authorization: Bearer <token>` header. Non-admin tokens receive `HTTP 403`.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/admin/drive/files/` | List Drive files (supports `page`, `pageSize`, `search`) |
+| `POST` | `/api/admin/drive/upload/` | Upload a file (multipart/form-data, field name `file`) |
+| `DELETE` | `/api/admin/drive/delete/<file_id>/` | Delete a Drive file by ID |
+| `POST` | `/api/admin/drive/sync/` | Trigger background Drive sync |
+| `GET` | `/api/admin/drive/sync/progress/` | Poll sync progress (returns JSON with `status`, `progress`, `recent_logs`) |
+| `GET` | `/api/admin/embeddings/status/` | Embedding stats (collections, chunk count, table size) |
+| `POST` | `/api/admin/embeddings/generate/` | Start background embedding generation |
+| `POST` | `/api/admin/embeddings/verify/` | Verify index integrity |
+| `POST` | `/api/admin/embeddings/clear/` | Delete all embeddings |
+| `GET` | `/api/admin/embeddings/progress/` | Poll embedding generation progress |
+| `GET` | `/api/admin/embeddings/processed/` | List files with chunk counts |
+| `DELETE` | `/api/admin/embeddings/delete/<file_name>/` | Delete one document's embeddings |
+| `GET` | `/api/admin/metrics/` | Full aggregated metrics JSON |
+| `GET` | `/api/admin/metrics/queries/` | Paginated query history |
+| `GET` | `/api/admin/metrics/queries/<query_id>/` | Individual query detail with metric explanations |
+| `GET` | `/api/admin/metrics/ratings/` | Aggregated user feedback (like/dislike) |
+| `GET` | `/api/admin/pipeline/status/` | RAG pipeline component readiness |
+
+<Tip>
+  The sync and embedding generation endpoints return immediately with `HTTP 200` and a background job is started. Always poll the corresponding `/progress/` endpoint to track completion — this design prevents nginx/gunicorn timeouts on large corpora.
+</Tip>

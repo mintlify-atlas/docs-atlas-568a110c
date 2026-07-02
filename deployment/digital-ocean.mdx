@@ -1,0 +1,247 @@
+---
+title: "Deploy NISIRA Assistant on DigitalOcean App Platform"
+sidebarTitle: "DigitalOcean"
+description: "Deploy the Django backend on DigitalOcean App Platform and the React frontend on Heroku, with automatic GitHub-based deploys, PostgreSQL, and HTTPS."
+---
+
+NISIRA Assistant is a monorepo containing both a Django backend and a React frontend. The recommended cloud deployment splits the two: the **backend** runs as a containerized service on **DigitalOcean App Platform** backed by a managed PostgreSQL database, while the **frontend** is deployed to **Heroku** using a subdirectory buildpack. Both services automatically redeploy whenever you push to the `main` branch on GitHub.
+
+## Architecture Overview
+
+```
+GitHub (main branch)
+       │
+       ├──► DigitalOcean App Platform
+       │        └── Django + Gunicorn  (port 8000)
+       │             └── Managed PostgreSQL
+       │
+       └──► Heroku
+                └── React  (built by Node.js buildpack)
+```
+
+- **DigitalOcean App Platform** builds the backend using `backend/Dockerfile`, injects environment variables at runtime, and exposes the service over HTTPS at a `*.ondigitalocean.app` subdomain.
+- **Heroku** builds the React app from the `frontend/` subdirectory and serves the static build via the `heroku/nodejs` buildpack.
+- CORS is configured on the backend to accept requests only from the frontend's Heroku domain.
+
+---
+
+## Backend — DigitalOcean App Platform
+
+<Steps>
+  <Step title="Create a new App Platform app">
+    1. Log in to [cloud.digitalocean.com](https://cloud.digitalocean.com/apps).
+    2. Click **Create App**.
+    3. Select **GitHub** as the source, authorize the DigitalOcean GitHub App, and choose the `HugoX2003/nisira-assistant` repository, branch `main`.
+    4. Enable **Autodeploy** so every push to `main` triggers a new build.
+  </Step>
+
+  <Step title="Configure the source directory and Dockerfile">
+    In the resource settings for the web service:
+
+    - **Source Directory:** `/backend`
+    - **Dockerfile Path:** `backend/Dockerfile`
+
+    <Warning>
+      The **Source Directory** must be set to `/backend`. If it is left as the repository root, the build will fail because the platform will not find the correct `requirements.txt` and Django project structure.
+    </Warning>
+  </Step>
+
+  <Step title="Set environment variables">
+    Add the following environment variables in **Settings → App-Level Environment Variables**:
+
+    | Variable                    | Value / Notes                                               |
+    |-----------------------------|-------------------------------------------------------------|
+    | `DJANGO_SETTINGS_MODULE`    | `core.production_settings`                                  |
+    | `SECRET_KEY`                | A long, random string — never reuse dev values              |
+    | `DEBUG`                     | `False`                                                     |
+    | `DATABASE_URL`              | `${db.DATABASE_URL}` — auto-populated after adding the DB   |
+    | `ALLOWED_HOSTS`             | `.ondigitalocean.app` (or your custom domain)               |
+    | `OPENROUTER_API_KEY`        | Your OpenRouter API key                                     |
+    | `GOOGLE_API_KEY`            | Your Google API key (for embeddings)                        |
+    | `PORT`                      | `8000`                                                      |
+    | `GUNICORN_WORKERS`          | `2` (increase for larger plans)                             |
+    | `GUNICORN_TIMEOUT`          | `300`                                                       |
+    | `CORS_ALLOWED_ORIGINS`      | Your Heroku frontend URL, e.g. `https://your-app.herokuapp.com` |
+
+    <Note>
+      `DATABASE_URL` uses the App Platform binding syntax `${db.DATABASE_URL}`. DigitalOcean automatically resolves this to the managed database's connection string once you attach a database resource in the next step.
+    </Note>
+  </Step>
+
+  <Step title="Add a managed PostgreSQL database">
+    1. In the App editor, click **Add Resource → Database**.
+    2. Select **PostgreSQL** (choose the smallest plan to start — you can scale later).
+    3. Name the component `db` so the `${db.DATABASE_URL}` binding resolves correctly.
+    4. Click **Save**.
+
+    DigitalOcean provisions the database and automatically injects the connection string into your app environment.
+  </Step>
+
+  <Step title="Configure the health check">
+    Under the web service's **Health Check** settings:
+
+    - **Path:** `/api/health/`
+    - **Port:** `8000`
+
+    The backend container exposes this endpoint, which returns `200 OK` once Django and the database are ready.
+  </Step>
+
+  <Step title="Deploy and verify">
+    Click **Create Resources**. DigitalOcean will build the Docker image, run `python manage.py migrate` (handled by the entrypoint), and start Gunicorn. Monitor progress in **Runtime Logs**.
+
+    Once the build completes, test the API:
+
+    ```bash
+    curl https://<your-app>.ondigitalocean.app/api/health/
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Frontend — Heroku
+
+<Steps>
+  <Step title="Create a Heroku app and connect GitHub">
+    1. Go to [dashboard.heroku.com](https://dashboard.heroku.com) and create a new app (e.g. `nisira-assistant-frontend`).
+    2. In the **Deploy** tab, choose **GitHub** as the deployment method.
+    3. Search for `nisira-assistant`, click **Connect**, then click **Enable Automatic Deploys** (branch: `main`).
+  </Step>
+
+  <Step title="Add buildpacks for the monorepo subdirectory">
+    Because the React app lives in `frontend/` rather than the repository root, you need two buildpacks applied in order:
+
+    ```bash
+    heroku buildpacks:add -a nisira-assistant-frontend \
+      https://github.com/timanovsky/subdir-heroku-buildpack
+
+    heroku buildpacks:add -a nisira-assistant-frontend heroku/nodejs
+    ```
+
+    The `timanovsky/subdir-heroku-buildpack` rewrites the build context to the specified subdirectory before the `heroku/nodejs` buildpack runs.
+
+    <Note>
+      Buildpack order matters. The subdirectory buildpack **must** be listed first so Heroku changes into `frontend/` before Node.js attempts `npm install`.
+    </Note>
+  </Step>
+
+  <Step title="Set Config Vars">
+    Add these in **Settings → Config Vars** (or via the Heroku CLI):
+
+    | Variable              | Value                                                      |
+    |-----------------------|------------------------------------------------------------|
+    | `PROJECT_PATH`        | `frontend`                                                 |
+    | `REACT_APP_API_URL`   | `https://<your-app>.ondigitalocean.app` (backend base URL) |
+    | `GENERATE_SOURCEMAP`  | `false`                                                    |
+    | `NODE_ENV`            | `production`                                               |
+
+    ```bash
+    heroku config:set PROJECT_PATH=frontend -a nisira-assistant-frontend
+    heroku config:set REACT_APP_API_URL=https://<your-app>.ondigitalocean.app \
+      -a nisira-assistant-frontend
+    heroku config:set GENERATE_SOURCEMAP=false -a nisira-assistant-frontend
+    heroku config:set NODE_ENV=production -a nisira-assistant-frontend
+    ```
+  </Step>
+
+  <Step title="Trigger an initial deploy">
+    Push any commit to `main` to trigger the first automatic deploy, or use the **Manual Deploy** button in the Heroku dashboard.
+
+    Verify the frontend is live:
+
+    ```bash
+    heroku open -a nisira-assistant-frontend
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Alternative: Self-Hosted Droplet Deployment
+
+If you prefer to run everything on a single server rather than using managed platforms, DigitalOcean Droplets with Docker Compose are a cost-effective option.
+
+### Server setup
+
+<Steps>
+  <Step title="Create a Droplet">
+    Provision an **Ubuntu 22.04 LTS** Droplet with at least **4 GB RAM / 2 vCPUs** (the `$24/month` Basic plan). Add your SSH public key during creation.
+  </Step>
+
+  <Step title="Run the setup script">
+    The repository includes `setup-server.sh`, which installs Docker, Docker Compose, `certbot`, configures UFW, and sets the timezone:
+
+    ```bash
+    ssh root@your-droplet-ip
+    cd /opt && git clone https://github.com/HugoX2003/nisira-assistant.git
+    cd nisira-assistant
+    chmod +x setup-server.sh
+    ./setup-server.sh
+    ```
+
+    The script opens ports `22`, `80`, and `443` in UFW and confirms the installed versions on exit.
+  </Step>
+
+  <Step title="Configure environment variables">
+    ```bash
+    cp .env.production.example .env.production
+    nano .env.production
+    ```
+
+    Generate a strong `SECRET_KEY`:
+
+    ```bash
+    python3 -c "import secrets; print(secrets.token_urlsafe(50))"
+    ```
+  </Step>
+
+  <Step title="Deploy with Docker Compose">
+    ```bash
+    docker compose -f docker-compose.production.yml up -d --build
+    ```
+  </Step>
+
+  <Step title="Obtain an SSL certificate with Certbot">
+    ```bash
+    certbot --nginx -d your-domain.com -d www.your-domain.com
+    certbot renew --dry-run   # verify automatic renewal
+    ```
+
+    After obtaining the certificate, set `SECURE_SSL_REDIRECT=True`, `SESSION_COOKIE_SECURE=True`, and `CSRF_COOKIE_SECURE=True` in `.env.production`, then rebuild:
+
+    ```bash
+    docker compose -f docker-compose.production.yml up -d --build backend
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Updating the Deployment
+
+Both DigitalOcean App Platform and Heroku watch the `main` branch and redeploy automatically on every push. No manual steps are required after the initial configuration.
+
+For the self-hosted Droplet:
+
+```bash
+git pull origin main
+docker compose -f docker-compose.production.yml up -d --build
+```
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely Cause | Fix |
+|---|---|---|
+| Backend returns `500` on first deploy | Migrations haven't run | Check entrypoint logs; the backend Dockerfile runs `migrate` automatically on startup |
+| `CORS` errors in the browser | `CORS_ALLOWED_ORIGINS` missing or incorrect | Set `CORS_ALLOWED_ORIGINS` to the exact Heroku frontend URL (no trailing slash) |
+| Heroku build fails with "no package.json" | `PROJECT_PATH` not set or buildpack order wrong | Ensure `timanovsky/subdir-heroku-buildpack` is **first** and `PROJECT_PATH=frontend` is set |
+| `DATABASE_URL` unresolved on DigitalOcean | Database component named differently | Rename the DB component to `db` or update the binding to match the component name |
+| Health check fails on DigitalOcean | App still starting up | Increase the health check grace period; the `backend/Dockerfile` sets `start_period=40s` |
+| `ALLOWED_HOSTS` error | Custom domain not in `ALLOWED_HOSTS` | Add your domain, e.g. `your-domain.com,www.your-domain.com` |
+| SSL not working on Droplet | Certbot not run or Nginx not reloaded | Run `certbot --nginx -d your-domain.com` and `nginx -t && systemctl reload nginx` |
+
+<Tip>
+  On DigitalOcean App Platform, the **Runtime Logs** tab streams live output from the container. This is the fastest way to diagnose startup failures without needing SSH access.
+</Tip>

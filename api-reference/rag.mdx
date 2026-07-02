@@ -1,0 +1,377 @@
+---
+title: "RAG System API: Pipeline Control and Direct Querying"
+sidebarTitle: "RAG"
+description: "Initialize the RAG pipeline, sync documents, run direct queries, and check system status via the /api/rag/ endpoints. All require JWT authentication."
+---
+
+The RAG (Retrieval-Augmented Generation) System API exposes low-level control over the NISIRA pipeline: checking readiness, triggering document synchronization from Google Drive, and running queries directly against the vector store with fine-grained parameter control. These endpoints are distinct from `POST /api/chat/` — they bypass conversation persistence and are better suited for testing, evaluation scripts, and the admin panel. Unless noted, all endpoints require a valid JWT Bearer token.
+
+## GET /api/rag/status/
+
+Returns the current readiness state of the RAG pipeline by instantiating a `RAGPipeline` object and calling `is_ready()` on each of its components. Requires JWT authentication.
+
+### Response
+
+<ResponseField name="rag_available" type="boolean">
+  `true` if the RAG Python modules were successfully imported at server start. `false` means the dependencies are missing and a `503` is returned instead.
+</ResponseField>
+
+<ResponseField name="status" type="object">
+  Component-level readiness map.
+
+  <Expandable title="Status object fields">
+    <ResponseField name="modules_available" type="boolean">
+      Whether the `rag_system` package is importable.
+    </ResponseField>
+    <ResponseField name="components" type="object">
+      Dictionary of component names to boolean readiness flags (e.g., `{"vector_store": true, "embeddings": true}`).
+    </ResponseField>
+    <ResponseField name="version" type="string">
+      RAG pipeline version string (e.g., `"1.0.0"`).
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp of when the status was checked.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X GET https://your-domain.com/api/rag/status/ \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+```json
+{
+  "rag_available": true,
+  "status": {
+    "modules_available": true,
+    "components": {
+      "vector_store": true,
+      "embeddings": true,
+      "document_processor": true
+    },
+    "version": "1.0.0"
+  },
+  "timestamp": "2024-11-10T14:00:00.000Z"
+}
+```
+
+---
+
+## POST /api/rag/initialize/
+
+Initializes the `RAGPipeline` instance and verifies that all components are operational. This is typically called once after deployment to warm up the pipeline before the first user query. Requires JWT authentication.
+
+### Response
+
+<ResponseField name="message" type="string">
+  Human-readable confirmation, e.g., `"Sistema RAG inicializado correctamente"`.
+</ResponseField>
+
+<ResponseField name="result" type="object">
+  <Expandable title="Result object fields">
+    <ResponseField name="success" type="boolean">
+      `true` if initialization completed without errors.
+    </ResponseField>
+    <ResponseField name="components" type="object">
+      Per-component readiness map returned by `pipeline.is_ready()`.
+    </ResponseField>
+    <ResponseField name="message" type="string">
+      Short status string from the pipeline.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Example
+
+```bash
+curl -X POST https://your-domain.com/api/rag/initialize/ \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+```json
+{
+  "message": "Sistema RAG inicializado correctamente",
+  "result": {
+    "success": true,
+    "components": {
+      "vector_store": true,
+      "embeddings": true,
+      "document_processor": true
+    },
+    "message": "Sistema RAG inicializado"
+  }
+}
+```
+
+---
+
+## POST /api/rag/sync/
+
+Triggers a document synchronization pass via `pipeline.sync_and_process_documents()`. This downloads new or changed files from Google Drive (or local storage), chunks them, generates embeddings, and upserts the vectors into the configured store. Accepts an optional `force_reprocess` flag to re-embed files that are already indexed. Requires JWT authentication.
+
+### Request Body
+
+<ParamField body="force_reprocess" type="boolean" default="false">
+  When `true`, re-processes and re-indexes all documents even if they have already been embedded (identified by MD5 hash). Use this after updating the embedding model or chunking strategy.
+</ParamField>
+
+### Response
+
+<ResponseField name="message" type="string">
+  Confirmation string on success.
+</ResponseField>
+
+<ResponseField name="result" type="object">
+  Sync results object returned by the pipeline.
+
+  <Expandable title="Result object fields">
+    <ResponseField name="success" type="boolean">
+      `true` if sync completed without fatal errors.
+    </ResponseField>
+    <ResponseField name="downloaded" type="integer">
+      Number of new files downloaded from Drive.
+    </ResponseField>
+    <ResponseField name="processed" type="integer">
+      Number of documents newly embedded.
+    </ResponseField>
+    <ResponseField name="skipped" type="integer">
+      Number of files skipped because they were already indexed.
+    </ResponseField>
+    <ResponseField name="errors" type="integer">
+      Number of files that failed processing.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Example
+
+```bash
+curl -X POST https://your-domain.com/api/rag/sync/ \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
+  -H "Content-Type: application/json" \
+  -d '{"force_reprocess": false}'
+```
+
+```json
+{
+  "message": "Documentos sincronizados y procesados correctamente",
+  "result": {
+    "success": true,
+    "downloaded": 3,
+    "processed": 3,
+    "skipped": 47,
+    "errors": 0
+  }
+}
+```
+
+---
+
+## POST /api/rag/query/
+
+Runs a direct RAG query outside of any conversation context. Useful for evaluation scripts, batch testing, and the admin panel. The `top_k` parameter can be set explicitly to override the adaptive calculation used by `POST /api/chat/`.
+
+<Note>
+  This endpoint has `AllowAny` permission in the source code — a JWT token is not enforced at the Django permission layer. However, best practice is to always supply the `Authorization` header in production environments.
+</Note>
+
+### Request Body
+
+<ParamField body="question" type="string" required>
+  The question to answer. Must be a non-empty string.
+</ParamField>
+
+<ParamField body="top_k" type="integer">
+  Number of document chunks to retrieve. Overrides the adaptive calculation. Clamped to the range [3, 15]. Omit to use `calculate_adaptive_top_k()` automatically.
+</ParamField>
+
+<ParamField body="include_generation" type="boolean" default="true">
+  When `true`, passes the retrieved context to the LLM and returns a natural-language answer. When `false`, returns only the retrieved chunks without generating a response.
+</ParamField>
+
+<ParamField body="collect_metrics" type="boolean">
+  When `true`, the system records `QueryMetrics` and `RAGASMetrics` records in the database for later analysis via the admin metrics endpoints.
+</ParamField>
+
+### Response
+
+<ResponseField name="question" type="string">
+  Echo of the submitted question.
+</ResponseField>
+
+<ResponseField name="answer" type="string">
+  LLM-generated answer (only present when `include_generation` is `true`).
+</ResponseField>
+
+<ResponseField name="sources" type="array">
+  Array of source citation objects (same structure as `POST /api/chat/` sources).
+</ResponseField>
+
+<ResponseField name="relevant_documents_count" type="integer">
+  Number of document chunks that were retrieved from the vector store.
+</ResponseField>
+
+<ResponseField name="generation_used" type="boolean">
+  Whether the LLM generation step was executed.
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp of the query.
+</ResponseField>
+
+### Example
+
+<Tabs>
+  <Tab title="cURL">
+    ```bash
+    curl -X POST https://your-domain.com/api/rag/query/ \
+      -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
+      -H "Content-Type: application/json" \
+      -d '{
+        "question": "¿Qué documentos se necesitan para un permiso de funcionamiento?",
+        "top_k": 8,
+        "include_generation": true
+      }'
+    ```
+  </Tab>
+  <Tab title="Response">
+    ```json
+    {
+      "question": "¿Qué documentos se necesitan para un permiso de funcionamiento?",
+      "answer": "Para obtener un permiso de funcionamiento necesita presentar...",
+      "sources": [
+        {
+          "title": "Manual de Trámites Municipales",
+          "filename": "manual_tramites.pdf",
+          "page_number": 22,
+          "score": 0.93,
+          "document_id": "doc_1a2b3c"
+        }
+      ],
+      "relevant_documents_count": 8,
+      "generation_used": true,
+      "timestamp": "2024-11-10T16:00:00.000Z"
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## POST /api/rag/chat/
+
+An enhanced chat endpoint that integrates the full RAG pipeline with conversation history support. Unlike `POST /api/chat/`, this endpoint accepts an explicit `history` array so you can pass conversation context from any source (not just stored DB messages). It also auto-creates a new conversation if `conversation_id` is omitted, and falls back gracefully to the basic chat handler if the RAG modules are unavailable. Requires JWT authentication.
+
+<Note>
+  For most frontend integrations, `POST /api/rag/chat/` is the recommended endpoint. It provides richer metrics tracking (via `MetricsTracker`) compared to `POST /api/chat/`, which uses a simpler response generation path.
+</Note>
+
+### Request Body
+
+<ParamField body="content" type="string" required>
+  The user's message. Must be non-empty.
+</ParamField>
+
+<ParamField body="conversation_id" type="string">
+  Slug or legacy numeric ID of an existing conversation. If omitted, a new conversation is created automatically with the message content as the title (truncated to 50 characters).
+</ParamField>
+
+<ParamField body="history" type="array">
+  Optional explicit conversation history to pass to the LLM. Each element is an object with `role` (`"user"` or `"assistant"`) and `content` (string). When `conversation_id` is provided and `history` is omitted, the backend automatically loads the 6 most recent messages from that conversation.
+</ParamField>
+
+<ParamField body="use_rag" type="boolean" default="true">
+  Set to `false` to bypass the RAG pipeline and use the basic keyword-based response generator. Automatically set to `false` for short greetings (under 30 characters) to avoid unnecessary retrieval.
+</ParamField>
+
+### Response
+
+<ResponseField name="conversation_id" type="string">
+  Slug of the conversation (new or existing).
+</ResponseField>
+
+<ResponseField name="user_message" type="object">
+  The saved user message record: `{id, content, timestamp}`.
+</ResponseField>
+
+<ResponseField name="assistant_message" type="object">
+  The saved assistant message record: `{id, content, timestamp, rating, rating_issue_tag}`.
+</ResponseField>
+
+<ResponseField name="response" type="string">
+  The assistant's answer text (duplicated from `assistant_message.content` for frontend compatibility).
+</ResponseField>
+
+<ResponseField name="rag_used" type="boolean">
+  Whether the RAG pipeline was actually invoked for this response.
+</ResponseField>
+
+<ResponseField name="sources" type="array">
+  Source citations for the response. Empty array when `rag_used` is `false`.
+</ResponseField>
+
+<ResponseField name="metrics" type="object">
+  Performance metrics summary from `MetricsTracker`: includes latency breakdown, top-k used, and RAGAS scores when available.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X POST https://your-domain.com/api/rag/chat/ \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "¿Cuál es el plazo para renovar una licencia de actividad económica?",
+    "conversation_id": "aB3dEfGhIjK"
+  }'
+```
+
+---
+
+## GET /api/rag/system-status/
+
+Returns a detailed diagnostic snapshot of the RAG pipeline by calling `pipeline.get_system_status()`. This is a more verbose version of `GET /api/rag/status/` that exposes internal component metadata. Requires JWT authentication (`AllowAny` in the source — same note as `/api/rag/query/`).
+
+### Response
+
+<ResponseField name="rag_available" type="boolean">
+  Whether the RAG modules are importable.
+</ResponseField>
+
+<ResponseField name="system_status" type="object">
+  Detailed component status object returned directly by `pipeline.get_system_status()`. Contents vary by deployment configuration but typically include vector store connection details, embedding model info, and document counts.
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp of the status check.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X GET https://your-domain.com/api/rag/system-status/ \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+```json
+{
+  "rag_available": true,
+  "system_status": {
+    "vector_store": {
+      "backend": "postgres",
+      "total_documents": 1847,
+      "is_ready": true
+    },
+    "embeddings": {
+      "model": "text-embedding-3-small",
+      "dimension": 1536,
+      "is_ready": true
+    }
+  },
+  "timestamp": "2024-11-10T16:30:00.000Z"
+}
+```

@@ -1,0 +1,347 @@
+---
+title: "Deploy NISIRA Assistant with Docker Compose"
+sidebarTitle: "Docker"
+description: "Run NISIRA Assistant locally with docker-compose.yml (MySQL) or in production with docker-compose.production.yml (PostgreSQL + pgvector + Nginx reverse proxy)."
+---
+
+NISIRA Assistant ships with two Docker Compose configurations: a development stack backed by MySQL for local experimentation, and a production stack using PostgreSQL with the `pgvector` extension, a dedicated Nginx reverse proxy, and hardened Django settings. Both stacks share the same backend and frontend images, so you build once and promote the same artifact from local to production.
+
+## Prerequisites
+
+Before starting, ensure the following tools are installed on your machine or server:
+
+- **Docker Engine** 24.0 or later — [Install Docker](https://docs.docker.com/engine/install/)
+- **Docker Compose v2** (bundled with Docker Desktop; run `docker compose version` to verify)
+- **Git** to clone the repository
+
+<Note>
+  Docker Compose v2 uses the `docker compose` command (with a space). The legacy `docker-compose` binary (v1) is no longer maintained. All commands in this guide use the v2 syntax.
+</Note>
+
+---
+
+## Development Stack (`docker-compose.yml`)
+
+The development stack spins up three services: a **MySQL 8.0** database, the **Django backend** on port `8000`, and the **React frontend** served from Nginx on port `3000 → 80`.
+
+### Services at a glance
+
+| Service    | Image / Build           | Port mapping  |
+|------------|-------------------------|---------------|
+| `db`       | `mysql:8.0`             | `3306:3306`   |
+| `backend`  | `./backend` (Dockerfile)| `8000:8000`   |
+| `frontend` | `./frontend` (Dockerfile)| `3000:80`    |
+
+### Required environment variables
+
+Create `backend/.env` before starting. At minimum, set:
+
+```bash
+# backend/.env
+
+DB_NAME=rag_asistente
+DB_USER=root
+DB_PASSWORD=sistemas
+DB_HOST=db
+DB_PORT=3306
+
+SECRET_KEY=replace-with-a-strong-random-string
+DEBUG=True
+
+OPENROUTER_API_KEY=sk-or-v1-YOUR_KEY
+GOOGLE_API_KEY=YOUR_GOOGLE_KEY
+
+PORT=8000
+```
+
+<Tip>
+  The `DB_HOST` value must match the Compose service name (`db`). Docker Compose places all services on the same internal network, so service names resolve automatically.
+</Tip>
+
+### Starting the development stack
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/HugoX2003/nisira-assistant.git
+    cd nisira-assistant
+    ```
+  </Step>
+
+  <Step title="Create backend/.env">
+    ```bash
+    cp .env.production.example backend/.env
+    # Edit backend/.env with your actual values
+    ```
+  </Step>
+
+  <Step title="Build and start all services">
+    ```bash
+    docker compose up --build
+    ```
+
+    The `--build` flag ensures Docker rebuilds the backend and frontend images if any source files have changed. Remove it on subsequent runs for a faster startup.
+  </Step>
+
+  <Step title="Run database migrations">
+    In a separate terminal, once the `backend` service reports it is healthy:
+
+    ```bash
+    docker compose exec backend python manage.py migrate
+    ```
+  </Step>
+
+  <Step title="Create a Django superuser (optional)">
+    ```bash
+    docker compose exec backend python manage.py createsuperuser
+    ```
+  </Step>
+
+  <Step title="Open the application">
+    - Frontend: [http://localhost:3000](http://localhost:3000)
+    - Backend API: [http://localhost:8000/api/](http://localhost:8000/api/)
+    - Django Admin: [http://localhost:8000/api/admin/](http://localhost:8000/api/admin/)
+  </Step>
+</Steps>
+
+### Stopping the development stack
+
+```bash
+# Stop and remove containers (volumes are preserved)
+docker compose down
+
+# Stop and remove containers AND all named volumes (destroys data)
+docker compose down -v
+```
+
+---
+
+## Production Stack (`docker-compose.production.yml`)
+
+The production stack replaces MySQL with **PostgreSQL 16 + pgvector**, hardens the Django settings module (`core.production_settings`), and adds an **Nginx** reverse proxy that routes `/api/` requests to the backend and all other traffic to the frontend.
+
+### Services at a glance
+
+| Service    | Image / Build                        | Notes                              |
+|------------|--------------------------------------|------------------------------------|
+| `db`       | `pgvector/pgvector:pg16`             | Built-in health check via `pg_isready` |
+| `backend`  | `./backend` (Dockerfile)             | Waits for `db` to be healthy       |
+| `frontend` | `./frontend` (Dockerfile)            | Built with `REACT_APP_API_URL` arg |
+| `nginx`    | `nginx:1.27-alpine`                  | Binds ports `80` and `443`         |
+
+All services share the `nisira-network` bridge network, and the Nginx configuration at `./nginx/nginx.conf` is mounted read-only.
+
+### Nginx routing summary
+
+```nginx
+# nginx/nginx.conf (abridged)
+location /api/ {
+    proxy_pass http://backend:8000;
+    proxy_read_timeout 300s;
+}
+
+location / {
+    proxy_pass http://frontend:80;
+}
+```
+
+### Required environment variables
+
+Copy `.env.production.example` to `.env.production` and fill in every value:
+
+```bash
+cp .env.production.example .env.production
+nano .env.production
+```
+
+Key variables required for production:
+
+```bash
+SECRET_KEY=replace-with-a-50-char-random-string
+DEBUG=False
+ALLOWED_HOSTS=your-domain.com,www.your-domain.com,your-droplet-ip
+
+DB_NAME=rag_asistente
+DB_USER=postgres
+DB_PASSWORD=STRONG_DB_PASSWORD
+
+OPENROUTER_API_KEY=sk-or-v1-YOUR_KEY
+GOOGLE_API_KEY=YOUR_GOOGLE_KEY
+
+REACT_APP_API_URL=https://your-domain.com
+CORS_ALLOWED_ORIGINS=https://your-domain.com,https://www.your-domain.com
+
+SECURE_SSL_REDIRECT=True
+SESSION_COOKIE_SECURE=True
+CSRF_COOKIE_SECURE=True
+
+GUNICORN_WORKERS=4
+GUNICORN_TIMEOUT=300
+PORT=8000
+```
+
+<Warning>
+  Never commit `.env.production` or `credentials.json` to version control. Add both to `.gitignore` and verify with `git status` before every push.
+</Warning>
+
+### Deploying the production stack
+
+<Steps>
+  <Step title="Build and start all services in detached mode">
+    ```bash
+    docker compose -f docker-compose.production.yml up -d --build
+    ```
+  </Step>
+
+  <Step title="Run database migrations">
+    ```bash
+    docker compose -f docker-compose.production.yml exec backend python manage.py migrate
+    ```
+  </Step>
+
+  <Step title="Create a Django superuser">
+    ```bash
+    docker compose -f docker-compose.production.yml exec backend python manage.py createsuperuser
+    ```
+  </Step>
+
+  <Step title="Verify all services are healthy">
+    ```bash
+    docker compose -f docker-compose.production.yml ps
+    ```
+
+    Every service should show `running` or `healthy` in the `STATUS` column.
+  </Step>
+
+  <Step title="Test the health endpoint">
+    ```bash
+    curl http://localhost/api/health/
+    ```
+
+    You should receive a `200 OK` response confirming the backend is reachable through Nginx.
+  </Step>
+</Steps>
+
+---
+
+## Root Dockerfile (Backend-Only Build)
+
+The root-level `Dockerfile` is designed for **DigitalOcean App Platform** deployments, where the frontend is hosted separately. It builds the backend only from `python:3.12-slim`, collects static assets, and starts Gunicorn automatically.
+
+```dockerfile
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DJANGO_SETTINGS_MODULE=core.settings \
+    PORT=8000
+
+WORKDIR /app
+
+# System dependencies
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       build-essential default-libmysqlclient-dev \
+       libjpeg62-turbo-dev zlib1g-dev libpq-dev curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY backend/requirements.txt ./
+RUN pip install --upgrade pip && pip install -r requirements.txt
+
+COPY backend/ /app/
+
+# Collect static assets using the minimal build settings
+RUN DJANGO_SETTINGS_MODULE=core.build_settings python manage.py collectstatic --noinput
+
+EXPOSE 8000
+
+# Run migrations then start Gunicorn
+CMD ["sh", "-c", \
+  "python manage.py migrate --noinput && \
+   gunicorn core.wsgi:application \
+     --bind 0.0.0.0:${PORT:-8000} \
+     --workers ${GUNICORN_WORKERS:-2} \
+     --timeout ${GUNICORN_TIMEOUT:-300} \
+     --access-logfile - --error-logfile - --log-level info"]
+```
+
+<Note>
+  The `backend/Dockerfile` (used by `docker-compose.production.yml`) is a multi-stage build that produces a smaller image with a non-root `django` user and a dedicated entrypoint script. Use that Dockerfile when deploying with Compose.
+</Note>
+
+---
+
+## Persistent Volume Mounts
+
+Both Compose files mount directories on the host into the backend container so that uploaded documents and vector embeddings survive container restarts:
+
+| Host path               | Container path     | Purpose                            |
+|-------------------------|--------------------|------------------------------------|
+| `./backend/data`        | `/app/data`        | Uploaded and processed documents   |
+| `./backend/chroma_db`   | `/app/chroma_db`   | ChromaDB vector store              |
+
+In production, these are managed as named Docker volumes (`rag_data`, `chroma_data`) rather than bind mounts:
+
+```yaml
+volumes:
+  rag_data:
+    driver: local
+  chroma_data:
+    driver: local
+```
+
+---
+
+## Updating the Application
+
+To deploy a new version, pull the latest code and rebuild:
+
+```bash
+git pull origin main
+docker compose -f docker-compose.production.yml up -d --build
+```
+
+Docker Compose rebuilds only the images whose build context has changed, then restarts the affected containers with zero-downtime rolling replacements.
+
+---
+
+## Useful Docker Commands
+
+<Tabs>
+  <Tab title="Logs">
+    ```bash
+    # Stream logs from all services
+    docker compose -f docker-compose.production.yml logs -f
+
+    # Stream logs from a single service
+    docker compose -f docker-compose.production.yml logs -f backend
+    ```
+  </Tab>
+
+  <Tab title="Shell Access">
+    ```bash
+    # Open a bash shell in the backend container
+    docker compose -f docker-compose.production.yml exec backend bash
+
+    # Run a one-off Django management command
+    docker compose -f docker-compose.production.yml exec backend \
+      python manage.py shell
+    ```
+  </Tab>
+
+  <Tab title="Resource Usage">
+    ```bash
+    # Live CPU / memory stats for all running containers
+    docker stats
+    ```
+  </Tab>
+
+  <Tab title="Database Backup">
+    ```bash
+    # Dump the PostgreSQL database to a local file
+    docker compose -f docker-compose.production.yml exec -T db \
+      pg_dump -U postgres rag_asistente > backup_$(date +%Y%m%d_%H%M%S).sql
+    ```
+  </Tab>
+</Tabs>

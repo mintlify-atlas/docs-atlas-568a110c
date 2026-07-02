@@ -1,0 +1,342 @@
+---
+title: "Ratings API: Collect User Feedback on Responses"
+sidebarTitle: "Ratings"
+description: "Submit like/dislike ratings with optional issue tags and comments. Retrieve aggregate summaries or export raw rating data as JSON or CSV."
+---
+
+The Ratings API lets users leave structured feedback on individual bot messages. Every rating consists of a thumbs-up/thumbs-down value, an optional plain-text comment, and an optional issue tag that categorizes the type of problem encountered. The system enforces a one-rating-per-user-per-message constraint — submitting a second rating for the same message updates the existing record rather than creating a duplicate. Ratings drive the guardrail system and feed into the admin metrics dashboard.
+
+## POST /api/ratings/
+
+Submit or update a rating for a bot message. Only `"bot"` sender messages can be rated — attempting to rate a user message returns a `400` error. If the authenticated user has already rated the target message, the existing record is updated (`update_or_create`). Use `value: "clear"` to remove an existing rating.
+
+### Request Body
+
+<ParamField body="message_id" type="integer" required>
+  The database ID of the `Message` record to rate. Obtain this from the `message_id` field in `POST /api/chat/` responses, or from `id` in the messages array returned by `GET /api/conversations/<id>/messages/`.
+</ParamField>
+
+<ParamField body="value" type="string" required>
+  The rating value. Must be one of:
+  - `"like"` — positive feedback
+  - `"dislike"` — negative feedback
+  - `"clear"` — remove an existing rating
+</ParamField>
+
+<ParamField body="comment" type="string">
+  Optional free-text comment explaining the rating. Maximum 500 characters.
+</ParamField>
+
+<ParamField body="issue_tag" type="string" default="none">
+  Categorical issue tag for dislike ratings. Must be one of the values listed in the [Issue Tags](#issue-tags) section below. Pass `"auto"` to have the system detect the tag from the comment text using keyword matching.
+</ParamField>
+
+### Response
+
+<ResponseField name="message_id" type="integer">
+  ID of the message that was rated.
+</ResponseField>
+
+<ResponseField name="conversation_id" type="integer">
+  ID of the conversation containing the rated message.
+</ResponseField>
+
+<ResponseField name="value" type="string">
+  The stored rating value (`"like"` or `"dislike"`), or `null` if the rating was cleared.
+</ResponseField>
+
+<ResponseField name="status" type="string">
+  Action taken: `"created"`, `"updated"`, `"removed"`, or `"noop"`.
+</ResponseField>
+
+<ResponseField name="updated_at" type="string">
+  ISO 8601 timestamp of when the rating was last modified.
+</ResponseField>
+
+<ResponseField name="issue_tag" type="string">
+  The issue tag that was stored.
+</ResponseField>
+
+<ResponseField name="queue_event" type="object">
+  Details of the async feedback event that was enqueued for downstream processing (telemetry, retraining pipelines, etc.). Only present when a rating was created or updated.
+
+  <Expandable title="Queue event fields">
+    <ResponseField name="id" type="integer">
+      Database ID of the `RatingFeedbackEvent` record.
+    </ResponseField>
+    <ResponseField name="status" type="string">
+      Processing status: `"pending"`, `"completed"`, or `"failed"`.
+    </ResponseField>
+    <ResponseField name="attempts" type="integer">
+      Number of processing attempts made.
+    </ResponseField>
+    <ResponseField name="last_attempt_at" type="string">
+      ISO 8601 timestamp of the most recent processing attempt.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Example
+
+<Tabs>
+  <Tab title="cURL — Like">
+    ```bash
+    curl -X POST https://your-domain.com/api/ratings/ \
+      -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
+      -H "Content-Type: application/json" \
+      -d '{
+        "message_id": 482,
+        "value": "like"
+      }'
+    ```
+  </Tab>
+  <Tab title="cURL — Dislike with tag">
+    ```bash
+    curl -X POST https://your-domain.com/api/ratings/ \
+      -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
+      -H "Content-Type: application/json" \
+      -d '{
+        "message_id": 483,
+        "value": "dislike",
+        "comment": "La respuesta mencionó un reglamento que no existe.",
+        "issue_tag": "alucinacion"
+      }'
+    ```
+  </Tab>
+  <Tab title="Response">
+    ```json
+    {
+      "message_id": 482,
+      "conversation_id": 47,
+      "value": "like",
+      "status": "created",
+      "updated_at": "2024-11-10T14:30:00.000Z",
+      "issue_tag": "none",
+      "queue_event": {
+        "id": 91,
+        "status": "completed",
+        "attempts": 1,
+        "last_attempt_at": "2024-11-10T14:30:00.123Z"
+      }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Issue Tags
+
+Issue tags provide a structured vocabulary for categorizing negative feedback. They are only meaningful on `dislike` ratings, but can be stored on `like` ratings as well (with `"none"` as the default).
+
+| Tag value | Label | When to use |
+|---|---|---|
+| `none` | Sin etiqueta | No specific issue — default for all ratings |
+| `irrelevante` | Irrelevante | Response did not address the question asked |
+| `sin_evidencia` | Sin evidencia | Response made claims without citing supporting documents |
+| `tardio` | Tardío | Response took too long to arrive (latency issue) |
+| `alucinacion` | Alucinación | Response contained invented facts, non-existent references, or hallucinated content |
+| `accion_incorrecta` | Acción incorrecta | The recommended action or procedure was wrong |
+| `otro` | Otro | Any other issue not covered by the above categories |
+
+<Note>
+  You can also pass `"auto"` as the `issue_tag` value. The backend will attempt to detect the appropriate tag by scanning the `comment` field for Spanish-language keywords (e.g., "irrelev", "sin fuente", "alucina", "invent"). If no keyword matches, it falls back to `"otro"`.
+</Note>
+
+---
+
+## GET /api/ratings/summary/
+
+Returns an aggregate statistical summary of all ratings in the system. This endpoint is restricted to **staff users** (`is_staff=True`).
+
+### Response
+
+<ResponseField name="total" type="integer">
+  Total number of ratings across all users and messages.
+</ResponseField>
+
+<ResponseField name="likes" type="integer">
+  Total number of positive ratings.
+</ResponseField>
+
+<ResponseField name="dislikes" type="integer">
+  Total number of negative ratings.
+</ResponseField>
+
+<ResponseField name="net_score" type="integer">
+  Difference between likes and dislikes (`likes - dislikes`).
+</ResponseField>
+
+<ResponseField name="satisfaction_rate" type="float">
+  Proportion of likes to total ratings (0.0–1.0). Used by the guardrail system as a quality threshold.
+</ResponseField>
+
+<ResponseField name="issue_breakdown" type="object">
+  Dictionary mapping each `issue_tag` value to its count across all dislike ratings.
+</ResponseField>
+
+<ResponseField name="daily_breakdown" type="array">
+  Per-day rating totals for the last 14 days, each entry with `date`, `total`, `likes`, `dislikes`.
+</ResponseField>
+
+<ResponseField name="recent_feedback" type="array">
+  The 10 most recently updated ratings with full detail: `id`, `message_id`, `conversation_id`, `value`, `comment`, `issue_tag`, `updated_at`, `username`.
+</ResponseField>
+
+<ResponseField name="queue" type="object">
+  Counts of `RatingFeedbackEvent` records by status: `{pending, failed, processed}`.
+</ResponseField>
+
+<ResponseField name="latest_experiment" type="object | null">
+  The most recent `ExperimentRun` record, or `null` if no experiments exist.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X GET https://your-domain.com/api/ratings/summary/ \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+```json
+{
+  "total": 214,
+  "likes": 178,
+  "dislikes": 36,
+  "net_score": 142,
+  "satisfaction_rate": 0.832,
+  "issue_breakdown": {
+    "none": 178,
+    "alucinacion": 12,
+    "irrelevante": 9,
+    "sin_evidencia": 8,
+    "otro": 7
+  },
+  "daily_breakdown": [
+    { "date": "2024-11-10", "total": 18, "likes": 15, "dislikes": 3 }
+  ],
+  "recent_feedback": [],
+  "queue": { "pending": 0, "failed": 0, "processed": 214 },
+  "latest_experiment": null,
+  "generated_at": "2024-11-10T17:00:00.000Z",
+  "export_url": "https://your-domain.com/api/ratings/export/"
+}
+```
+
+---
+
+## GET /api/ratings/export/
+
+Exports all rating records as JSON (default) or CSV. Restricted to **staff users** (`is_staff=True`).
+
+### Query Parameters
+
+<ParamField query="export_format" type="string" default="json">
+  Output format. Must be `"json"` or `"csv"`.
+</ParamField>
+
+### CSV columns
+
+When `export_format=csv`, the response is a downloadable file with the following columns: `rating_id`, `message_id`, `conversation_id`, `username`, `value`, `issue_tag`, `comment`, `updated_at`.
+
+### Example
+
+<Tabs>
+  <Tab title="JSON export">
+    ```bash
+    curl -X GET "https://your-domain.com/api/ratings/export/?export_format=json" \
+      -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+    ```
+    ```json
+    {
+      "count": 214,
+      "results": [
+        {
+          "id": 214,
+          "message_id": 482,
+          "conversation_id": 47,
+          "value": "like",
+          "comment": "",
+          "issue_tag": "none",
+          "updated_at": "2024-11-10T14:30:00.000Z"
+        }
+      ]
+    }
+    ```
+  </Tab>
+  <Tab title="CSV export">
+    ```bash
+    curl -X GET "https://your-domain.com/api/ratings/export/?export_format=csv" \
+      -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
+      -o ratings_export.csv
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Experiments & Guardrails
+
+These endpoints are used to track A/B experiment runs that compare a variant RAG configuration against a baseline, and to check whether the system is operating within quality guardrail thresholds. All require JWT authentication with staff privileges.
+
+### GET /api/experiments/
+
+Returns a paginated list of all `ExperimentRun` records ordered by most recent first.
+
+<ParamField query="limit" type="integer">
+  Maximum number of experiment records to return. Omit to return all.
+</ParamField>
+
+```bash
+curl -X GET https://your-domain.com/api/experiments/ \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+### GET /api/experiments/latest/
+
+Returns the single most recent `ExperimentRun` record. Returns `404` if no experiments exist.
+
+```bash
+curl -X GET https://your-domain.com/api/experiments/latest/ \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+### POST /api/experiments/create/
+
+Creates a new experiment run record and automatically evaluates it against configurable guardrail thresholds. If any delta (precision, faithfulness, or latency) breaches its threshold, `guardrail_passed` is set to `false` and `guardrail_reason` is populated.
+
+<ParamField body="name" type="string" required>Name of the experiment.</ParamField>
+<ParamField body="variant_name" type="string" required>Name of the variant being tested.</ParamField>
+<ParamField body="executed_by" type="string" required>Who ran the experiment.</ParamField>
+<ParamField body="baseline_precision" type="float" required>Baseline Precision@k score (0–1).</ParamField>
+<ParamField body="variant_precision" type="float" required>Variant Precision@k score (0–1).</ParamField>
+<ParamField body="baseline_faithfulness" type="float" required>Baseline faithfulness score (0–1).</ParamField>
+<ParamField body="variant_faithfulness" type="float" required>Variant faithfulness score (0–1).</ParamField>
+<ParamField body="baseline_latency" type="float" required>Baseline average latency in seconds.</ParamField>
+<ParamField body="variant_latency" type="float" required>Variant average latency in seconds.</ParamField>
+<ParamField body="guardrail_threshold_precision" type="float" default="-0.01">Minimum acceptable delta precision. Experiments with lower deltas are blocked.</ParamField>
+<ParamField body="guardrail_threshold_faithfulness" type="float" default="-0.01">Minimum acceptable delta faithfulness.</ParamField>
+<ParamField body="guardrail_threshold_latency" type="float" default="0.3">Maximum acceptable latency increase in seconds.</ParamField>
+
+### GET /api/guardrails/status/
+
+Evaluates the current system state against all guardrail conditions and returns a pass/fail summary. Checks: the latest experiment's `guardrail_passed` flag, any failed feedback events in the queue, and whether `satisfaction_rate` is above the configured threshold.
+
+<ParamField query="satisfaction_threshold" type="float" default="0.6">
+  Minimum acceptable satisfaction rate (0.0–1.0). The guardrail fails if the current rate is below this value.
+</ParamField>
+
+```json
+{
+  "guardrail_passed": true,
+  "messages": ["Todos los guardrails están en verde."],
+  "latest_experiment": null,
+  "metrics": {
+    "total_feedback": 214,
+    "satisfaction_rate": 0.832,
+    "net_score": 142,
+    "failed_feedback_events": 0
+  },
+  "generated_at": "2024-11-10T17:00:00.000Z"
+}
+```

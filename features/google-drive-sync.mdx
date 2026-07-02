@@ -1,0 +1,129 @@
+---
+title: "Sync Documents from Google Drive into NISIRA"
+sidebarTitle: "Drive Sync"
+description: "Automatically ingest files from a Google Drive folder into the RAG pipeline. Configure a service account or OAuth token, set a folder ID, and enable polling-based sync."
+---
+
+NISIRA can continuously ingest documents from a designated Google Drive folder without manual uploads. The `GoogleDriveManager` class (in `rag_system/drive_sync/drive_manager.py`) handles authentication, file listing, modification-time-aware downloading, and persistent storage. Once configured, you can trigger syncs on demand through the Admin Panel or let a background polling loop keep the knowledge base up to date automatically.
+
+## How the Sync Works
+
+On each sync cycle, `sync_documents()` calls the Drive API to list all supported files in the configured folder. For each file, it compares the Drive modification time against what is already stored — in PostgreSQL (`file_store.get_file_modified_time()`) or on the local filesystem. Files that are new or have been updated since the last sync are downloaded to memory and saved to `PostgresFileStore` (or the local filesystem as a fallback). Files that are already current are skipped.
+
+The polling interval is controlled by `GOOGLE_DRIVE_SYNC_INTERVAL` (default **300 seconds**), read directly from the environment at startup into `GOOGLE_DRIVE_CONFIG["sync_interval"]`.
+
+## Supported Formats and Size Limit
+
+| Extension | Max Size |
+|---|---|
+| `.pdf` | 50 MB |
+| `.txt` | 50 MB |
+| `.docx` / `.doc` | 50 MB |
+| `.pptx` | 50 MB |
+| `.xlsx` | 50 MB |
+
+Files larger than 50 MB are skipped with a `"TOO_LARGE"` sentinel and do not block the sync of other files.
+
+## Setup
+
+<Steps>
+  <Step title="Create a Google Cloud project and enable the Drive API">
+    In the [Google Cloud Console](https://console.cloud.google.com/), create a new project (or select an existing one) and enable the **Google Drive API** from the API Library.
+  </Step>
+  <Step title="Create credentials">
+    Choose one of two credential types:
+
+    - **Service Account (recommended for production)** — create a service account, download the JSON key file. Share your Drive folder with the service account's email address (Editor permission) so it has access to the folder contents.
+    - **OAuth 2.0 (development / personal Drive)** — create an OAuth 2.0 client ID, download `credentials.json`, and complete the browser-based consent flow to generate `token.json`. OAuth tokens use personal Drive quota and avoid the zero-storage limitation of service accounts.
+  </Step>
+  <Step title="Configure environment variables">
+    Set the following variables before starting the Django server:
+
+    ```bash
+    ENABLE_GOOGLE_DRIVE=true
+    GOOGLE_DRIVE_FOLDER_ID=<your_folder_id>
+
+    # Option A – JSON string in env var (production, auto-writes credentials.json)
+    GOOGLE_CREDENTIALS_JSON='{"type":"service_account",...}'
+    GOOGLE_TOKEN_JSON='{"token":"...","refresh_token":"...",...}'
+
+    # Option B – file paths (development)
+    # Place credentials.json and token.json in the backend root; no extra env vars needed.
+
+    # Optional overrides
+    GOOGLE_DRIVE_SYNC_INTERVAL=300        # Polling interval in seconds
+    ```
+
+    When `GOOGLE_CREDENTIALS_JSON` is set and `credentials.json` does not yet exist on disk, `config.py` writes the file automatically from the env var on startup.
+  </Step>
+  <Step title="Verify authentication">
+    NISIRA tries credential methods in this priority order:
+    1. OAuth2 via individual env vars (`GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN`) — uses personal Drive quota.
+    2. Existing `token.json` user token file.
+    3. Service account from `credentials.json`.
+
+    Call the status endpoint to confirm authentication is working:
+
+    ```bash
+    GET /api/admin/drive/files/
+    Authorization: Bearer <admin_JWT>
+    ```
+  </Step>
+  <Step title="Trigger your first sync">
+    From the Admin Panel click **Sync Now**, or call the API directly:
+
+    ```bash
+    POST /api/admin/drive/sync/
+    Authorization: Bearer <admin_JWT>
+    ```
+
+    Poll the progress endpoint while the sync runs:
+
+    ```bash
+    GET /api/admin/drive/sync/progress/
+    Authorization: Bearer <admin_JWT>
+    ```
+  </Step>
+</Steps>
+
+## Drive Management API Endpoints
+
+All endpoints require an admin JWT in the `Authorization: Bearer` header.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/admin/drive/files/` | List all files in the configured Drive folder |
+| `POST` | `/api/admin/drive/upload/` | Upload a local file to the Drive folder |
+| `DELETE` | `/api/admin/drive/delete/<file_id>/` | Delete a file from Drive by its ID |
+| `POST` | `/api/admin/drive/sync/` | Trigger a full sync (download new/updated files) |
+| `GET` | `/api/admin/drive/sync/progress/` | Poll real-time sync progress and log messages |
+
+## Management Commands
+
+Run a background polling loop that syncs every `GOOGLE_DRIVE_SYNC_INTERVAL` seconds:
+
+```bash
+python manage.py start_drive_sync
+```
+
+Run a single full sync and exit (useful for scheduled tasks or CI):
+
+```bash
+python manage.py sync_drive_full
+```
+
+## Credential Methods in Detail
+
+| Method | When to Use | Token Refresh |
+|---|---|---|
+| OAuth env vars (`GOOGLE_OAUTH_CLIENT_ID` + `GOOGLE_OAUTH_REFRESH_TOKEN`) | Production with personal Drive | Automatic via `creds.refresh(Request())` |
+| `token.json` file | Development | Automatic if `refresh_token` present; re-run flow if expired |
+| Service account JSON | Production with shared folder | No refresh needed; permanent credentials |
+
+<Warning>
+Service accounts have **zero bytes of personal Drive storage**. You must share a folder from a personal Google Drive with the service account's email address and set that folder's ID as `GOOGLE_DRIVE_FOLDER_ID`. Uploading files to Drive via the API will fail with `storageQuotaExceeded` if the folder is not shared correctly.
+</Warning>
+
+<Tip>
+For unattended production deployments, use OAuth env vars (`GOOGLE_OAUTH_REFRESH_TOKEN`) rather than a service account. This avoids storage quota issues and eliminates the need to share a folder.
+</Tip>

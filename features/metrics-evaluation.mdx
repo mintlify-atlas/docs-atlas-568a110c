@@ -1,0 +1,178 @@
+---
+title: "RAG Evaluation Metrics in NISIRA Assistant"
+sidebarTitle: "Metrics & Eval"
+description: "NISIRA tracks Precision@k, Recall@k, Faithfulness, Hallucination Rate, Answer Relevancy, and WER without external APIs using a custom local evaluator."
+---
+
+NISIRA includes a fully self-contained evaluation layer that measures retrieval quality and answer fidelity for every query — without calling external APIs or requiring an OpenAI key. The RAGAS dependency has been removed and replaced by `CustomMetricsEvaluator` (`api/custom_evaluator.py`), which computes six accuracy metrics locally alongside the latency metrics already captured by `MetricsTracker` (`api/metrics_tracker.py`). All data is persisted in two Django models — `QueryMetrics` and `RAGASMetrics` — and surfaced through the Admin Panel and a JSON API endpoint.
+
+## Data Models
+
+### `QueryMetrics` — Per-query latency
+
+Saved automatically after every `rag_enhanced_chat` request by `MetricsTracker.save_metrics()`.
+
+| Field | Type | Description |
+|---|---|---|
+| `query_id` | `UUIDField` | Unique identifier for the query |
+| `query_text` | `TextField` | Full question text |
+| `total_latency` | `FloatField` | Wall-clock time from question receipt to response complete (seconds) |
+| `time_to_first_token` | `FloatField` | Time until the first LLM token is streamed (seconds) |
+| `retrieval_time` | `FloatField` | Time spent in vector store search (seconds) |
+| `generation_time` | `FloatField` | Time spent in LLM generation (seconds) |
+| `is_complex_query` | `BooleanField` | `True` when `documents_retrieved > 0` |
+| `query_complexity_score` | `FloatField` | Complexity score (0.0–1.0) |
+| `documents_retrieved` | `IntegerField` | Number of chunks returned by hybrid search |
+| `top_k` | `IntegerField` | The adaptive top_k value used for this query |
+
+### `RAGASMetrics` — Per-query accuracy
+
+Created alongside `QueryMetrics` when `RAGAS_ENABLED=true` or when the custom evaluator runs. Linked via `query_metrics` foreign key.
+
+| Field | Type | Description |
+|---|---|---|
+| `evaluation_id` | `UUIDField` | Unique evaluation record ID |
+| `precision_at_k` | `FloatField` | Precision@k score (0.0–1.0) |
+| `recall_at_k` | `FloatField` | Recall@k score (0.0–1.0) |
+| `faithfulness_score` | `FloatField` | Faithfulness score (0.0–1.0) |
+| `answer_relevancy` | `FloatField` | Answer relevancy score (0.0–1.0) |
+| `hallucination_rate` | `FloatField` | Derived: `1.0 - faithfulness_score` |
+| `wer_score` | `FloatField` | Word Error Rate (0.0–∞); populated only when ground truth is available |
+| `k_value` | `IntegerField` | The `k` used for precision/recall calculations |
+
+## Metrics Reference
+
+| Metric | Range | Calculation Method |
+|---|---|---|
+| **Precision@k** | 0–1 | Jaccard similarity between each retrieved chunk and the generated answer; chunk is "relevant" if similarity > 8% threshold |
+| **Recall@k** | 0–1 | 3-word n-gram extraction from each chunk; chunk "used" if any n-gram appears in the answer |
+| **Faithfulness** | 0–1 | Response split into sentences; sentence "supported" if >60% of its keywords appear in the combined context |
+| **Hallucination Rate** | 0–1 | `1.0 − Faithfulness`; lower is better |
+| **Answer Relevancy** | 0–1 | Keyword overlap between the question and the answer, with a +0.1 bonus for answers 20–300 words long |
+| **WER** | 0–∞ | Levenshtein distance (word-level) between the generated answer and a ground-truth reference; only computed when a reference is provided |
+
+<Info>
+The custom evaluator runs entirely in Python using only the standard library and NumPy — no network calls, no API keys, no quota limits. Evaluation adds negligible latency because it runs asynchronously after the response has already been returned to the user.
+</Info>
+
+## Enabling the Evaluator
+
+Metric evaluation is gated by the `RAGAS_ENABLED` environment variable (default `false`). Set it to activate per-query accuracy scoring:
+
+```bash
+RAGAS_ENABLED=true
+```
+
+When disabled, latency metrics (`QueryMetrics`) are still captured; only the accuracy scores (`RAGASMetrics`) are skipped.
+
+## Accessing Metrics
+
+### Admin Panel
+
+Navigate to **Admin Panel → Metrics tab** to see aggregated charts and per-query breakdowns.
+
+### REST API
+
+```http
+GET /api/admin/metrics/
+Authorization: Bearer <admin_JWT>
+```
+
+**Example response:**
+
+```json
+{
+  "success": true,
+  "metrics": {
+    "performance": {
+      "avgResponseTime": 2.34,
+      "timeToFirstToken": 0.45,
+      "complexQueryTime": 3.12,
+      "totalQueries": 156
+    },
+    "precision": {
+      "precisionAtK": 0.85,
+      "recallAtK": 0.78,
+      "hallucinationRate": 0.08,
+      "faithfulness": 0.92
+    },
+    "metadata": {
+      "lastUpdated": "2025-11-14T03:50:00",
+      "dataSource": "real_database_custom_metrics",
+      "kValue": 5,
+      "isRealData": true
+    }
+  }
+}
+```
+
+### Django ORM Queries
+
+Query the models directly from a Django shell or management command:
+
+```python
+from django.db.models import Avg
+from api.models import QueryMetrics, RAGASMetrics
+
+# Average latency across all queries
+QueryMetrics.objects.aggregate(avg_latency=Avg('total_latency'))
+# → {'avg_latency': 2.34}
+
+# Average precision and faithfulness
+RAGASMetrics.objects.aggregate(
+    avg_precision=Avg('precision_at_k'),
+    avg_faithfulness=Avg('faithfulness_score'),
+    avg_wer=Avg('wer_score'),
+)
+# → {'avg_precision': 0.85, 'avg_faithfulness': 0.92, 'avg_wer': 0.07}
+
+# Latency for complex queries only
+QueryMetrics.objects.filter(is_complex_query=True).aggregate(
+    avg_complex_latency=Avg('total_latency')
+)
+```
+
+## A/B Experiment Tracking
+
+The `ExperimentRun` model stores the results of A/B experiments comparing configuration variants (e.g. different `top_k` values, embedding models, or prompt templates).
+
+| Field | Description |
+|---|---|
+| `baseline_*` | Metric values for the control configuration |
+| `variant_*` | Metric values for the experimental configuration |
+| `delta_*` | Computed difference: `variant − baseline` |
+| `guardrail_passed` | `True` if the variant meets all minimum quality thresholds |
+| `guardrail_reason` | Human-readable explanation when a guardrail fails |
+
+### Experiment Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/experiments/` | List all experiment runs (admin only) |
+| `POST` | `/api/experiments/create/` | Record a new experiment run |
+| `GET` | `/api/experiments/latest/` | Fetch the most recent experiment |
+
+<Warning>
+All experiment and metrics endpoints require an admin JWT (`is_staff=True`). Requests from non-staff users receive a `403 Forbidden` response.
+</Warning>
+
+## Metric Calculation Walk-Through
+
+The following example shows how each metric is computed for a single real query, using the method signatures from `CustomMetricsEvaluator`:
+
+**Question:** `"¿Qué es ISO 27001 y cuáles son sus controles principales?"`
+
+**Retrieved chunks (k=5):**
+1. `"ISO 27001 define requisitos para establecer..."` — overlap 45% → **relevant**
+2. `"Los controles de ISO 27001 incluyen gestión de acceso..."` — overlap 38% → **relevant**
+3. `"La norma ISO 27002 proporciona guías..."` — overlap 25% → **relevant**
+4. `"Documento sobre GDPR y privacidad..."` — overlap 5% → not relevant
+5. `"Manual de configuración de firewalls..."` — overlap 2% → not relevant
+
+| Metric | Calculation | Score |
+|---|---|---|
+| Precision@5 | 3 relevant / 5 retrieved | **0.60** |
+| Recall@5 | Response uses phrases from chunks 1, 2, 3 → 3/5 covered | **0.60** |
+| Faithfulness | 7 of 8 response sentences have >60% keyword coverage in context | **0.875** |
+| Hallucination Rate | `1 − 0.875` | **0.125** |
+| Answer Relevancy | All 4 question keywords present; response 50 words long (+0.1 bonus) | **1.0** |

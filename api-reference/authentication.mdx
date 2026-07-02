@@ -1,0 +1,291 @@
+---
+title: "Authenticate with NISIRA Assistant API Using JWT"
+sidebarTitle: "Authentication"
+description: "Obtain JWT access and refresh tokens via login or token endpoints. Attach the access token as Authorization: Bearer <token> on all protected requests."
+---
+
+NISIRA Assistant uses JSON Web Tokens (JWT) for all API authentication. The flow is straightforward: register or log in to receive an access token and a refresh token, attach the access token as a `Bearer` header on every protected request, and use the refresh endpoint to silently renew it before it expires. All four auth endpoints are publicly accessible — no prior token is needed.
+
+## Register a New User
+
+<br />
+
+**`POST /api/auth/register/`**
+
+Creates a new user account. The endpoint applies strict server-side validation before persisting the user.
+
+### Validation Rules
+
+<ParamField body="username" type="string" required>
+  Must be 3–20 characters. Only letters, numbers, and underscores (`_`) are allowed. Must start with a letter. Must be unique across all accounts.
+</ParamField>
+
+<ParamField body="email" type="string" required>
+  Must be a valid email format matching the pattern `local@domain.tld`. No consecutive dots (`..`) allowed. Must be unique across all accounts.
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  Minimum 6 characters. Must contain at least one letter and at least one number.
+</ParamField>
+
+### Example Request
+
+```bash
+curl -X POST http://localhost:8000/api/auth/register/ \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "hugo_dev",
+    "email": "hugo@example.com",
+    "password": "secure123"
+  }'
+```
+
+### Successful Response — `201 Created`
+
+```json
+{
+  "message": "Usuario registrado exitosamente",
+  "user": {
+    "id": 42,
+    "username": "hugo_dev",
+    "email": "hugo@example.com"
+  }
+}
+```
+
+### Error Responses
+
+| HTTP | `error` value |
+|---|---|
+| `400` | `"El nombre de usuario es requerido"` |
+| `400` | `"El nombre de usuario debe tener al menos 3 caracteres"` |
+| `400` | `"El nombre de usuario no puede tener más de 20 caracteres"` |
+| `400` | `"El nombre de usuario solo puede contener letras, números y guion bajo (_)"` |
+| `400` | `"El nombre de usuario debe comenzar con una letra"` |
+| `400` | `"El formato del email no es válido"` |
+| `400` | `"El email no puede contener puntos consecutivos (..)"` |
+| `400` | `"La contraseña debe tener al menos 6 caracteres"` |
+| `400` | `"La contraseña debe contener al menos una letra y un número"` |
+| `400` | `"El nombre de usuario ya está en uso"` |
+| `400` | `"El email ya está registrado"` |
+
+---
+
+## Login
+
+<br />
+
+**`POST /api/auth/login/`**
+
+Authenticates an existing user and returns a JWT token pair together with the full user object. This is the recommended login endpoint because it includes user profile data alongside the tokens.
+
+### Request Body
+
+<ParamField body="username" type="string" required>
+  The account's username.
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  The account's password.
+</ParamField>
+
+### Example Request
+
+```bash
+curl -X POST http://localhost:8000/api/auth/login/ \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "hugo_dev",
+    "password": "secure123"
+  }'
+```
+
+### Successful Response — `200 OK`
+
+```json
+{
+  "access": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refresh": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "user": {
+    "id": 42,
+    "username": "hugo_dev",
+    "email": "hugo@example.com",
+    "first_name": "",
+    "last_name": ""
+  }
+}
+```
+
+<ResponseField name="access" type="string">
+  Short-lived access token. Valid for **24 hours**. Attach this to the `Authorization` header on all protected requests.
+</ResponseField>
+
+<ResponseField name="refresh" type="string">
+  Long-lived refresh token. Valid for **7 days**. Use it to obtain new access tokens without re-entering credentials.
+</ResponseField>
+
+<ResponseField name="user.id" type="integer">
+  Unique numeric identifier for the authenticated user.
+</ResponseField>
+
+<ResponseField name="user.username" type="string">
+  The account's username.
+</ResponseField>
+
+<ResponseField name="user.email" type="string">
+  The account's email address.
+</ResponseField>
+
+<ResponseField name="user.first_name" type="string">
+  First name (empty string if not set).
+</ResponseField>
+
+<ResponseField name="user.last_name" type="string">
+  Last name (empty string if not set).
+</ResponseField>
+
+### Error Responses
+
+| HTTP | `error` value |
+|---|---|
+| `400` | `"Por favor ingresa tu usuario y contraseña"` |
+| `400` | `"Por favor ingresa tu nombre de usuario"` |
+| `400` | `"Por favor ingresa tu contraseña"` |
+| `401` | `"El usuario no existe. Verifica tu nombre de usuario o regístrate"` |
+| `401` | `"Contraseña incorrecta. Intenta nuevamente"` |
+| `403` | `"Tu cuenta está desactivada. Contacta al administrador"` |
+
+---
+
+## Obtain Token Pair (JWT Standard)
+
+<br />
+
+**`POST /api/auth/token/`**
+
+The standard `djangorestframework-simplejwt` obtain-pair endpoint. Returns the same access and refresh tokens as the login endpoint, but without the user object. Suitable for integrations that need a pure JWT flow.
+
+### Request Body
+
+<ParamField body="username" type="string" required>
+  The account's username.
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  The account's password.
+</ParamField>
+
+### Example Request
+
+```bash
+curl -X POST http://localhost:8000/api/auth/token/ \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "hugo_dev",
+    "password": "secure123"
+  }'
+```
+
+### Successful Response — `200 OK`
+
+```json
+{
+  "access": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refresh": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+}
+```
+
+---
+
+## Refresh Access Token
+
+<br />
+
+**`POST /api/auth/refresh/`**
+
+Exchanges a valid refresh token for a new access token. Because `ROTATE_REFRESH_TOKENS` is enabled, **a new refresh token is also issued** and the old one is blacklisted immediately.
+
+### Request Body
+
+<ParamField body="refresh" type="string" required>
+  A valid, unexpired refresh token obtained from the login or token-pair endpoint.
+</ParamField>
+
+### Example Request
+
+```bash
+curl -X POST http://localhost:8000/api/auth/refresh/ \
+  -H "Content-Type: application/json" \
+  -d '{"refresh": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."}'
+```
+
+### Successful Response — `200 OK`
+
+```json
+{
+  "access": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+}
+```
+
+<ResponseField name="access" type="string">
+  A fresh access token valid for another **24 hours**.
+</ResponseField>
+
+<Warning>
+  Because `ROTATE_REFRESH_TOKENS = True` and `BLACKLIST_AFTER_ROTATION = True`, each refresh token can only be used **once**. Always persist the latest refresh token from your most recent refresh call. Replaying an already-consumed refresh token returns `401 Unauthorized`.
+</Warning>
+
+---
+
+## Using the Token on Protected Requests
+
+Once you hold an access token, attach it to every protected API call using the standard `Authorization` header:
+
+```bash
+curl -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
+  http://localhost:8000/api/conversations/
+```
+
+### Token Lifetimes (from `settings.py`)
+
+| Token | Lifetime | Setting key |
+|---|---|---|
+| Access token | **24 hours** | `ACCESS_TOKEN_LIFETIME = timedelta(hours=24)` |
+| Refresh token | **7 days** | `REFRESH_TOKEN_LIFETIME = timedelta(days=7)` |
+
+The signing algorithm is `HS256`. The `user_id` claim inside the token payload identifies the authenticated user.
+
+### Frontend Token Handling
+
+The React frontend (`src/services/api.js`) manages tokens automatically using its `TokenManager` class:
+
+- On login, both `access` and `refresh` tokens are saved to **`localStorage`** under the keys `token` and `refresh`.
+- An Axios request interceptor appends `Authorization: Bearer <token>` to every outbound request that is not an auth endpoint.
+- A response interceptor catches `401` responses and **transparently calls `/api/auth/refresh/`** to obtain a new access token, then retries the original request — all without user intervention.
+- If the refresh itself fails (e.g. the refresh token has expired), both tokens are cleared from `localStorage` and the error is propagated to the caller.
+
+---
+
+## Document-Serving Token Passthrough
+
+**`GET /api/documents/<filename>/`**
+
+File serving supports two authentication modes because browsers cannot attach custom headers to `<iframe src="...">` or `<embed>` elements used for inline PDF viewing.
+
+| Mode | How to pass the token |
+|---|---|
+| Standard API call | `Authorization: Bearer <access_token>` header |
+| PDF iframe / embed | `?token=<access_token>` query parameter |
+
+```bash
+# Standard download
+curl -H "Authorization: Bearer eyJ..." \
+  http://localhost:8000/api/documents/report-q3.pdf/
+
+# Inline viewer (iframe src)
+http://localhost:8000/api/documents/report-q3.pdf/?token=eyJ...#page=5
+```
+
+<Note>
+  The `?token=` parameter enables browsers to navigate directly to a specific page inside the PDF (via the `#page=N` URL fragment) while still validating the JWT. The server validates the token identically in both modes using `JWTAuthentication`.
+</Note>

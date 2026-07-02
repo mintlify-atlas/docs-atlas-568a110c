@@ -1,0 +1,226 @@
+---
+title: "Monitoring System Health and RAG Metrics in NISIRA"
+sidebarTitle: "Monitoring"
+description: "Monitor query latency, retrieval precision, faithfulness scores, and system health via the Admin Panel metrics tab or the /api/admin/metrics/ and /api/health/ endpoints."
+---
+
+NISIRA exposes dedicated endpoints for health checks and performance metrics, and aggregates them in the Admin Panel **Metrics** and **Pipeline** tabs. Every query the assistant answers is automatically recorded in the database, so metrics reflect real production traffic without any manual instrumentation.
+
+## Health check endpoints
+
+### GET /api/health/
+
+A lightweight liveness check that returns immediately without requiring authentication.
+
+```
+GET /api/health/
+```
+
+```json
+{
+  "status": "healthy",
+  "timestamp": "2025-01-14T03:50:00.123456",
+  "message": "API funcionando correctamente"
+}
+```
+
+### GET /api/status/
+
+A richer status endpoint that runs all registered health checks and returns component-level results. Implemented in `monitoring/health.py` using the `SERVICE_REGISTRY`, which defines four check functions: `api`, `database`, `worker`, and `vector_db`.
+
+```
+GET /api/status/
+```
+
+```json
+{
+  "status": "healthy",
+  "timestamp": "2025-01-14T03:50:00.123456",
+  "services": {
+    "api": {
+      "ok": true,
+      "details": { "django_version": "5.0.1", "debug": false, "latency_ms": 0.12 }
+    },
+    "database": {
+      "ok": true,
+      "details": { "engine": "django.db.backends.postgresql", "latency_ms": 3.41 }
+    },
+    "worker": {
+      "ok": true,
+      "details": { "authenticated": true, "folder_id": "...", "local_files_count": 142, "latency_ms": 210.5 }
+    },
+    "vector_db": {
+      "ok": true,
+      "details": { "collection_name": "rag_embeddings", "total_documents": 15799, "latency_ms": 18.7 }
+    }
+  },
+  "build": {
+    "version": "1.0.0",
+    "environment": "production",
+    "commit": "a1b2c3d4",
+    "dependencies": { "django": "5.0.1", "sentence_transformers": "2.7.0" }
+  },
+  "uptime_slo_target": 0.95
+}
+```
+
+The `overall_status` function returns `"healthy"` when all components pass, `"degraded"` when at least one passes, and `"down"` when all fail.
+
+<Info>
+  Each component check measures its own execution time and reports it as `latency_ms`. If a check throws an exception it is caught, `ok` is set to `false`, and the error message is included in `details.error` — the remaining checks still execute.
+</Info>
+
+## Performance metrics
+
+Query performance data is stored in the `QueryMetrics` model and aggregated on demand by `GET /api/admin/metrics/`. Three headline numbers are surfaced in the **Metrics tab → Summary view**:
+
+| Metric | Source field | Unit | Description |
+|--------|-------------|------|-------------|
+| **Latencia promedio** (`latenciaTotal`) | `total_latency` | seconds | Average wall-clock time from query receipt to full response, calculated as `end_time − start_time` using `time.time()` |
+| **Velocidad** (`reduccionTiempo`) | derived | tokens/second | Response token count divided by total latency |
+| **Calidad RAGAS** (`calidadRespuesta`) | `faithfulness_score` + `answer_relevancy` | 0–1 | Composite quality score from the custom evaluator |
+| **Total queries** | `totalQueries` | count | Total recorded queries in the database |
+
+The `QueryMetrics` model also tracks `time_to_first_token`, `retrieval_time`, `generation_time`, `documents_retrieved`, `is_complex_query`, and `query_complexity_score`. All of these are accessible per-query through the query detail endpoint.
+
+## Precision metrics
+
+Precision data is stored in the `RAGASMetrics` model (computed by the custom evaluator, no external API required) and linked to `QueryMetrics` via a foreign key. Available fields:
+
+| Metric | Field | Range | Calculation |
+|--------|-------|-------|-------------|
+| **Precision@k** | `precision_at_k` | 0–1 | Fraction of the retrieved k documents whose Jaccard overlap with the response exceeds 20% |
+| **Recall@k** | `recall_at_k` | 0–1 | Fraction of retrieved contexts that contributed at least one 3-word n-gram to the response |
+| **Faithfulness** | `faithfulness_score` | 0–1 | Fraction of response sentences whose keywords are ≥ 60% covered by the retrieved contexts |
+| **Hallucination rate** | `hallucination_rate` | 0–1 | `1.0 − faithfulness_score`; auto-computed on save |
+| **Answer relevancy** | `answer_relevancy` | 0–1 | Fraction of query keywords present in the response, with a length bonus for 20–300 word responses |
+| **WER** | `wer_score` | 0–∞ | Word Error Rate (Levenshtein distance), recorded only when ground-truth is available |
+
+## Admin metrics API
+
+### GET /api/admin/metrics/
+
+Returns all aggregated metrics in a single JSON response. Requires admin JWT.
+
+```
+GET /api/admin/metrics/
+Authorization: Bearer <admin_token>
+```
+
+```json
+{
+  "success": true,
+  "metrics": {
+    "performance": {
+      "avgResponseTime": 2.34,
+      "timeToFirstToken": 0.45,
+      "totalQueries": 156
+    },
+    "precision": {
+      "precisionAtK": 0.85,
+      "faithfulness": 0.92,
+      "hallucinationRate": 0.08
+    }
+  }
+}
+```
+
+<Note>
+  Metrics are computed live from the `QueryMetrics` and `RAGASMetrics` tables on each request. If `totalQueries` is `0`, no queries have been made yet — metrics populate automatically as users interact with the chat assistant.
+</Note>
+
+## Query history
+
+### GET /api/admin/metrics/queries/
+
+Returns a paginated list of all recorded queries with their performance metrics. Accepts `page`, `page_size`, and `complex_only` query parameters.
+
+```
+GET /api/admin/metrics/queries/?page=1&page_size=20&complex_only=false
+Authorization: Bearer <admin_token>
+```
+
+Each item in the `queries` array includes `query_id`, `query_text` (truncated to 200 characters), `timestamp`, `is_complex`, `complexity_score`, a `performance` block (`total_latency`, `time_to_first_token`, `retrieval_time`, `generation_time`, `documents_retrieved`), and a `precision` block when RAGAS metrics are available.
+
+### GET /api/admin/metrics/queries/\<query_id\>/
+
+Returns the full detail for a single query, including a step-by-step explanation of how each metric was calculated for that specific request — including the exact formula, input values, and a human-readable interpretation. Useful for debugging retrieval quality on individual queries.
+
+```
+GET /api/admin/metrics/queries/abc123.../
+Authorization: Bearer <admin_token>
+```
+
+The response includes a `precision` block with `k_value`, `documentos_relevantes`, `documentos_irrelevantes`, and the full calculation string (e.g. `"3 documentos relevantes / 5 documentos totales = 0.6000"`).
+
+## Rating metrics
+
+User thumbs-up / thumbs-down feedback from the chat interface is aggregated at:
+
+```
+GET /api/admin/metrics/ratings/
+Authorization: Bearer <admin_token>
+```
+
+The response includes `total_ratings`, a `distribution` object (`likes`, `dislikes`, `like_percentage`, `dislike_percentage`), a `top_issues` list of the most-reported issue tags (irrelevante, sin_evidencia, tardio, alucinacion, accion_incorrecta, otro), and a `recent_ratings` array with the latest individual feedback entries.
+
+## Pipeline status
+
+Check the operational state of all RAG subsystems:
+
+```
+GET /api/admin/pipeline/status/
+Authorization: Bearer <admin_token>
+```
+
+```json
+{
+  "success": true,
+  "status": {
+    "drive_sync": true,
+    "embeddings": true,
+    "vector_store": true,
+    "pipeline": true
+  },
+  "overall": "operational"
+}
+```
+
+`overall` is `"operational"` when both `embeddings` and `vector_store` are `true`; otherwise `"degraded"`. The **Pipeline tab** in the Admin Panel renders these four boolean flags as status cards with check/cross icons.
+
+## Guardrail status
+
+The experiment guardrail endpoint is available to `is_staff` users and reports whether the latest `ExperimentRun` passed its quality thresholds and whether the user satisfaction rate is above the configured floor:
+
+```
+GET /api/guardrails/status/?satisfaction_threshold=0.6
+Authorization: Bearer <staff_token>
+```
+
+A `guardrail_passed: false` response means either the last experiment was blocked, the satisfaction rate is below threshold, or there are failed rating feedback events pending review.
+
+## Direct model inspection
+
+For ad-hoc queries against the raw metric tables, use the Django admin at `/django-admin/`. The models `api | Query metrics` and `api | RAGAS metrics` are both registered and searchable. You can also query the database directly:
+
+```python
+from django.db.models import Avg
+from api.models import QueryMetrics, RAGASMetrics
+
+# Average latency and TTFT across all queries
+QueryMetrics.objects.aggregate(
+    avg_latency=Avg('total_latency'),
+    avg_ttft=Avg('time_to_first_token'),
+)
+
+# Average precision and faithfulness scores
+RAGASMetrics.objects.aggregate(
+    avg_precision=Avg('precision_at_k'),
+    avg_faithfulness=Avg('faithfulness_score'),
+    avg_wer=Avg('wer_score'),
+)
+```
+
+<Tip>
+  All metrics are computed locally by `api/custom_evaluator.py` using only the Python standard library — no external API keys or network calls are required. This means evaluation runs offline and adds negligible latency to each query.
+</Tip>

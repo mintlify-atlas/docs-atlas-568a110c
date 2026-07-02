@@ -1,0 +1,415 @@
+---
+title: "Admin API Endpoints for NISIRA Assistant"
+sidebarTitle: "Admin Endpoints"
+description: "Admin-only endpoints for Drive file management, embedding generation, system metrics, query history, and pipeline status. Require admin JWT authentication."
+---
+
+The admin API provides privileged access to the operational internals of the NISIRA Assistant: managing documents in Google Drive, controlling the embedding generation pipeline, viewing detailed RAG performance metrics, and inspecting the status of each system component. All endpoints under `/api/admin/` are guarded by the `admin_required` decorator, which checks that the authenticated user's username is exactly `admin`. Standard staff (`is_staff`) accounts cannot access these endpoints.
+
+## Authentication Note
+
+Every `/api/admin/*` endpoint requires:
+
+1. A valid JWT access token in the `Authorization: Bearer <token>` header.
+2. The authenticated user must have the username `"admin"`. This is enforced by the `is_admin_user()` helper in `admin_views.py`, which checks `user.username == "admin"` directly.
+
+<Warning>
+  Only the single `admin` account has access to these endpoints. Even `is_staff=True` users are rejected with `403 Forbidden` if their username is not `admin`. This is intentional — the admin panel in the frontend performs the same check.
+</Warning>
+
+---
+
+## Drive Management
+
+These endpoints interface with Google Drive to list, upload, delete, and synchronize the source documents that the RAG pipeline indexes. If Drive is not authenticated (no valid OAuth credentials), upload and delete operations fall back to local filesystem storage.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/admin/drive/files/` | List files in the configured Drive folder with pagination and search |
+| `POST` | `/api/admin/drive/upload/` | Upload a file to Drive (and local storage); triggers background embedding |
+| `DELETE` | `/api/admin/drive/delete/<file_id>/` | Permanently delete a file from Drive by its Drive file ID |
+| `POST` | `/api/admin/drive/sync/` | Trigger a full Drive→local sync in a background thread |
+| `GET` | `/api/admin/drive/sync/progress/` | Poll the sync progress (status, percentage, recent logs) |
+
+### GET /api/admin/drive/files/
+
+<ParamField query="page" type="integer" default="1">
+  Page number for paginated file listing.
+</ParamField>
+
+<ParamField query="pageSize" type="integer" default="20">
+  Number of files per page.
+</ParamField>
+
+<ParamField query="search" type="string">
+  Filter files by name (case-insensitive substring match).
+</ParamField>
+
+```bash
+curl -X GET "https://your-domain.com/api/admin/drive/files/?page=1&pageSize=20" \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+```json
+{
+  "success": true,
+  "files": [
+    {
+      "id": "1BxiMvzU3WhxL8dOmNJKp7jXkLmNoPqR",
+      "name": "reglamento_construccion_2024.pdf",
+      "mimeType": "application/pdf",
+      "size": 2048576,
+      "modifiedTime": "2024-10-15T10:30:00.000Z",
+      "parents": ["0APmHfj3gMvO0Uk9PVA"]
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "pageSize": 20,
+    "totalFiles": 53,
+    "totalPages": 3,
+    "hasNextPage": true,
+    "hasPrevPage": false
+  }
+}
+```
+
+### POST /api/admin/drive/upload/
+
+Accepts `multipart/form-data`. Allowed extensions: `.pdf`, `.txt`, `.md`, `.doc`, `.docx`. The file is saved to Google Drive (if authenticated) and locally. Embedding generation is launched automatically in a background thread — the endpoint returns immediately without waiting for embeddings to complete.
+
+<ParamField body="file" type="file" required>
+  The document file to upload. Must be one of the supported types above.
+</ParamField>
+
+```bash
+curl -X POST https://your-domain.com/api/admin/drive/upload/ \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
+  -F "file=@/path/to/document.pdf"
+```
+
+```json
+{
+  "success": true,
+  "message": "Archivo 'document.pdf' subido a Drive. Procesando embeddings en segundo plano.",
+  "file_name": "document.pdf",
+  "file_id": "1BxiMvzU3WhxL8dOmNJKp7jXkLmNoPqR",
+  "file_path": "/app/data/documents/document.pdf",
+  "drive_uploaded": true,
+  "processing": "background"
+}
+```
+
+### POST /api/admin/drive/sync/
+
+Launches a background thread that downloads all new or changed files from Drive and processes them into the vector store. Returns immediately; use `GET /api/admin/drive/sync/progress/` to track progress. Returns `409 Conflict` if a sync is already running.
+
+If new files are downloaded, embedding generation is triggered automatically after the sync completes — no separate call to `POST /api/admin/embeddings/generate/` is needed.
+
+```bash
+curl -X POST https://your-domain.com/api/admin/drive/sync/ \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+### GET /api/admin/drive/sync/progress/
+
+Poll this endpoint after starting a sync to track its progress. The backend writes progress data to a JSON file (`sync_progress.json`) that this endpoint reads. If the status is `"running"` but no log entry has been added in the last 90 seconds, the status is automatically changed to `"error"` (stale worker detection).
+
+```json
+{
+  "status": "running",
+  "message": "12/53 - manual_tramites_2024.pdf",
+  "progress": 22,
+  "current": 12,
+  "total": 53,
+  "downloaded": 3,
+  "recent_logs": [
+    { "timestamp": "2024-11-10T16:05:01", "message": "[OK] reglamento_construccion.pdf descargado" },
+    { "timestamp": "2024-11-10T16:05:04", "message": "[INFO] 12/53 - manual_tramites_2024.pdf" }
+  ]
+}
+```
+
+---
+
+## Embeddings Management
+
+These endpoints control the embedding pipeline — generating, verifying, and clearing the vector representations stored in PostgreSQL (`pgvector`) or ChromaDB.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/admin/embeddings/status/` | Current embedding store status and document counts per collection |
+| `POST` | `/api/admin/embeddings/generate/` | Start background embedding generation for all unprocessed documents |
+| `POST` | `/api/admin/embeddings/verify/` | Verify embedding integrity across collections |
+| `POST` | `/api/admin/embeddings/clear/` | **Destructive** — delete all embeddings from the vector store |
+| `GET` | `/api/admin/embeddings/progress/` | Poll embedding generation progress |
+| `GET` | `/api/admin/embeddings/processed/` | List all files that have been embedded, with chunk counts |
+| `DELETE` | `/api/admin/embeddings/delete/<file_name>/` | Delete embeddings for a single named file |
+
+### GET /api/admin/embeddings/status/
+
+```bash
+curl -X GET https://your-domain.com/api/admin/embeddings/status/ \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+```json
+{
+  "success": true,
+  "backend": "postgres",
+  "total_collections": 1,
+  "total_documents": 1847,
+  "collections": [
+    { "name": "rag_embeddings", "document_count": 1847 }
+  ],
+  "storage_info": {
+    "total_documents": 1847,
+    "unique_files": 53
+  }
+}
+```
+
+### POST /api/admin/embeddings/generate/
+
+Starts embedding generation in a background thread. Returns `409 Conflict` if generation is already running. The backend uses a `DocumentLoader` to discover all available files (from PostgreSQL file store or filesystem), skips files that are already embedded (checked by MD5 hash), and processes new files sequentially. Use `GET /api/admin/embeddings/progress/` to track completion.
+
+```bash
+curl -X POST https://your-domain.com/api/admin/embeddings/generate/ \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+```json
+{
+  "success": true,
+  "message": "Generacion iniciada en background. Use el endpoint de progreso para seguimiento."
+}
+```
+
+### GET /api/admin/embeddings/progress/
+
+Polls the `embedding_progress.json` file written by the background embedding thread. Returns an idle state if no generation has been started.
+
+```json
+{
+  "status": "running",
+  "total": 53,
+  "current": 31,
+  "current_file": "guia_procedimientos_administrativos.pdf",
+  "processed": 30,
+  "errors": 0,
+  "logs": [
+    "[INFO] [31/53] Procesando: guia_procedimientos_administrativos.pdf",
+    "   [OK] Completado: 84 chunks"
+  ]
+}
+```
+
+### POST /api/admin/embeddings/clear/
+
+<Warning>
+  This is a **destructive, irreversible operation**. All vector embeddings are deleted from the store. Documents and their source files are not deleted, but the assistant will be unable to answer questions until embeddings are regenerated.
+</Warning>
+
+```bash
+curl -X POST https://your-domain.com/api/admin/embeddings/clear/ \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+```json
+{
+  "success": true,
+  "message": "Limpieza completada. 1847 embeddings eliminados.",
+  "embeddings_deleted": 1847,
+  "backend": "postgres"
+}
+```
+
+### DELETE /api/admin/embeddings/delete/\<file_name\>/
+
+Deletes all embedding chunks for a single document. Useful when you want to re-process a file after it has been updated. After deletion, re-run `POST /api/admin/embeddings/generate/` to rebuild the embeddings.
+
+<ParamField body="file_hash" type="string">
+  Optional MD5 hash of the file for more precise deletion targeting. If omitted, all chunks matching `file_name` are deleted.
+</ParamField>
+
+```bash
+curl -X DELETE \
+  "https://your-domain.com/api/admin/embeddings/delete/reglamento_construccion_2024.pdf/" \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+```json
+{
+  "success": true,
+  "deleted_embeddings": 127,
+  "file_name": "reglamento_construccion_2024.pdf",
+  "message": "[OK] Eliminados 127 embeddings de 'reglamento_construccion_2024.pdf'"
+}
+```
+
+---
+
+## Metrics
+
+The metrics endpoints expose the performance and quality data collected by `MetricsTracker` during each RAG query. Data is stored in the `QueryMetrics` and `RAGASMetrics` Django models and used for thesis-level analysis of the system.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/admin/metrics/` | Aggregated system metrics: latency, processing speed, response quality score |
+| `GET` | `/api/admin/metrics/queries/` | Paginated list of individual query records with performance breakdown |
+| `GET` | `/api/admin/metrics/queries/<query_id>/` | Full detail for a single query with metric calculation explanations |
+| `GET` | `/api/admin/metrics/ratings/` | Aggregated rating metrics: distribution, top issues, trending messages |
+
+### GET /api/admin/metrics/
+
+Returns the three top-level KPIs used for system evaluation:
+
+```bash
+curl -X GET https://your-domain.com/api/admin/metrics/ \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+```json
+{
+  "success": true,
+  "metrics": {
+    "latenciaTotal": 2.41,
+    "reduccionTiempo": 38.7,
+    "calidadRespuesta": 0.812,
+    "totalQueries": 1203,
+    "metadata": {
+      "lastUpdated": "2024-11-10T17:00:00.000Z",
+      "dataSource": "real_database_ragas_gemini",
+      "isRealData": true,
+      "description": "3 métricas finales: Latencia Total, Reducción de Tiempo, Calidad de Respuesta (RAGAS con Gemini)"
+    }
+  },
+  "message": "Métricas reales obtenidas: 1203 consultas"
+}
+```
+
+| Field | Unit | Description |
+|-------|------|-------------|
+| `latenciaTotal` | seconds | Average total response latency across all queries |
+| `reduccionTiempo` | tokens/second | Average LLM generation throughput |
+| `calidadRespuesta` | 0–1 score | Composite RAGAS quality score (faithfulness + answer relevancy + context precision) |
+
+### GET /api/admin/metrics/queries/
+
+<ParamField query="page" type="integer" default="1">
+  Page number.
+</ParamField>
+
+<ParamField query="page_size" type="integer" default="20">
+  Records per page.
+</ParamField>
+
+<ParamField query="complex_only" type="boolean" default="false">
+  When `true`, returns only queries classified as complex by the adaptive top-k algorithm.
+</ParamField>
+
+### GET /api/admin/metrics/queries/\<query_id\>/
+
+Returns a single query record with full metric detail and human-readable calculation explanations. The `query_id` is a UUID string obtained from the `query_id` field in the paginated list.
+
+```json
+{
+  "success": true,
+  "query": {
+    "query_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "query_text": "¿Cuáles son los requisitos para una licencia de construcción?",
+    "timestamp": "2024-11-10T14:22:07.451Z",
+    "top_k_used": 7,
+    "tiempo_respuesta": {
+      "valor": 2.3412,
+      "unidad": "segundos",
+      "metodo": "time.time() de Python",
+      "formula": "end_time - start_time"
+    },
+    "precision": {
+      "valor": 0.7143,
+      "porcentaje": "71.43%",
+      "formula": "documentos_relevantes / k"
+    },
+    "recall": {
+      "valor": 0.8571,
+      "porcentaje": "85.71%",
+      "formula": "contextos_usados / k"
+    }
+  }
+}
+```
+
+### GET /api/admin/metrics/ratings/
+
+Returns aggregated rating statistics for the admin panel: distribution of likes/dislikes, period stats (last week/month), top issue tags from dislike ratings, and the top 5 most-liked and most-disliked messages.
+
+```bash
+curl -X GET https://your-domain.com/api/admin/metrics/ratings/ \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+```json
+{
+  "success": true,
+  "total_ratings": 214,
+  "distribution": {
+    "likes": 178,
+    "dislikes": 36,
+    "like_percentage": 83.2,
+    "dislike_percentage": 16.8
+  },
+  "period_stats": {
+    "last_week": 42,
+    "last_month": 138
+  },
+  "top_issues": [
+    { "tag": "alucinacion", "label": "Alucinación", "count": 12 },
+    { "tag": "irrelevante", "label": "Irrelevante", "count": 9 }
+  ],
+  "top_liked_messages": [
+    { "message_id": 482, "text": "Para solicitar una licencia...", "likes": 8 }
+  ],
+  "top_disliked_messages": [],
+  "recent_ratings": []
+}
+```
+
+---
+
+## Pipeline
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/admin/pipeline/status/` | Detailed RAG pipeline component status including Drive, embeddings, and vector store |
+
+### GET /api/admin/pipeline/status/
+
+Checks each pipeline component independently and returns an overall health assessment.
+
+```bash
+curl -X GET https://your-domain.com/api/admin/pipeline/status/ \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+```json
+{
+  "success": true,
+  "status": {
+    "drive_sync": true,
+    "embeddings": true,
+    "vector_store": true,
+    "pipeline": true
+  },
+  "overall": "operational"
+}
+```
+
+| Component | `true` when… |
+|-----------|-------------|
+| `drive_sync` | `GoogleDriveManager.is_authenticated()` returns `true` |
+| `embeddings` | `EmbeddingManager` instantiates without error |
+| `vector_store` | At least one collection exists in ChromaDB (or pgvector is reachable) |
+| `pipeline` | Both `embeddings` and `vector_store` are `true` |
+
+The `overall` field is `"operational"` when `pipeline` is `true`, and `"degraded"` otherwise.

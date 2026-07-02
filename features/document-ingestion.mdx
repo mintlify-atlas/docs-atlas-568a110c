@@ -1,0 +1,110 @@
+---
+title: "Document Ingestion and Processing in NISIRA Assistant"
+sidebarTitle: "Document Ingestion"
+description: "Upload and embed PDF, DOCX, PPTX, XLSX, and TXT files. NISIRA chunks documents per format, generates 768-dimensional embeddings, and stores them in pgvector or ChromaDB."
+---
+
+Document ingestion is the process that converts raw files into searchable vector embeddings inside NISIRA's knowledge base. Every file — whether uploaded manually through the Admin Panel or pulled automatically from Google Drive — travels through the same five-stage pipeline: parsing, format-aware chunking, embedding generation, vector storage, and metadata registration. The following sections describe each stage in detail.
+
+## Supported File Formats
+
+NISIRA's `DOCUMENT_PROCESSING_CONFIG` (in `rag_system/config.py`) and `GOOGLE_DRIVE_CONFIG` both declare the same set of accepted extensions:
+
+| Extension | Parser Library | Notes |
+|---|---|---|
+| `.pdf` | `PyPDFLoader` (LangChain) → `pdfplumber` → `PyPDF2` (fallbacks) | Page number preserved in chunk metadata |
+| `.txt` | `TextProcessor` | Plain UTF-8; no structural extraction |
+| `.docx` / `.doc` | `python-docx` via `TextProcessor` | Section structure preserved |
+| `.pptx` | `python-pptx` via `TextProcessor` | Slide-level chunking |
+| `.xlsx` | `openpyxl` via `TextProcessor` | Sheet content extracted as text |
+
+<Note>
+Files arriving from Google Drive are skipped if they exceed **50 MB** (`max_file_size = 50 × 1024 × 1024` bytes). The `download_file()` method returns the sentinel value `"TOO_LARGE"` in that case and logs a warning — the file does not block the rest of the sync.
+</Note>
+
+## Processing Pipeline
+
+<Steps>
+  <Step title="Ingestion entry point">
+    Documents enter through one of two paths:
+    - **Admin Panel upload** — files are received by the Django API and written to `PostgresFileStore` (binary storage in the database) or the local filesystem as a fallback.
+    - **Google Drive sync** — `GoogleDriveManager.sync_documents()` downloads only files that are new or have been modified since the last sync (modification-time comparison) and stores them the same way.
+
+    Every file is registered in the `UploadedDocument` Django model with fields: `file_name`, `file_path` (`postgres://<uuid>` or a local path), `file_size`, `file_type`, `drive_file_id`, `processed`, `chunks_created`, and `embeddings_generated`.
+  </Step>
+  <Step title="Format-specific parsing">
+    `RAGPipeline.process_document()` dispatches to the correct processor based on the file extension:
+    - **PDF** → `PDFProcessor.process_pdf()`. The primary loader is LangChain's `PyPDFLoader` with `extraction_mode="layout"`. If PyPDF returns fewer than 50 characters per page, the processor retries with `pdfplumber`, then `PyPDF2` as a last resort.
+    - **All other formats** → `TextProcessor.process_document()`, which routes internally to `python-docx`, `python-pptx`, or `openpyxl`.
+
+    Each parser outputs a list of LangChain `Document` objects carrying `page_content` and `metadata` (including `source` filename, `page` number for PDFs, `total_pages`, and `word_count`).
+  </Step>
+  <Step title="Format-aware chunking">
+    Documents are split by `RecursiveCharacterTextSplitter` using per-format sizes defined in `DOCUMENT_PROCESSING_CONFIG["chunk_config"]`:
+
+    | Format | `chunk_size` | `chunk_overlap` | `min_chunk_size` |
+    |---|---|---|---|
+    | `.pdf` | 1 300 | 260 | 180 |
+    | `.txt` | 1 100 | 220 | 150 |
+    | `.docx` | 1 300 | 260 | 180 |
+    | Default | 1 000 | 200 | 100 |
+
+    Chunks smaller than `min_chunk_size` are discarded. Each surviving chunk receives a `chunk_id` index and a `chunk_size` character count appended to its metadata.
+  </Step>
+  <Step title="Embedding generation">
+    `EmbeddingManager.create_embeddings_batch()` converts chunk texts into **768-dimensional** float vectors. The active provider is selected at startup:
+
+    1. **Google `text-embedding-004`** — used when `GOOGLE_API_KEY` is set (production default).
+    2. **`sentence-transformers/all-mpnet-base-v2`** — local fallback via `SentenceTransformerAdapter` or `HuggingFaceEmbeddings`, processed in mini-batches of 4 to avoid memory pressure.
+
+    If a single embedding fails, the chunk is excluded from storage; successful chunks and their embeddings are kept paired.
+  </Step>
+  <Step title="Vector storage">
+    Valid chunk–embedding pairs are stored through `RAGPipeline.chroma_manager.add_documents()`, which routes to the configured backend:
+
+    - **PostgreSQL `pgvector`** — default in production (`VECTOR_STORE_BACKEND=postgres`). Chunks are stored with their full metadata for hybrid lexical + semantic search.
+    - **ChromaDB** — local development fallback or when `DATABASE_URL` is absent.
+
+    Documents are served back to users at `/api/documents/<filename>/` via `serve_document()`, which reads directly from `PostgresFileStore` or the local filesystem. PDF responses include an inline `Content-Disposition` header so the browser's native PDF viewer can honour `#page=N` fragment links generated from chunk `page_number` metadata.
+  </Step>
+</Steps>
+
+## Re-Embedding Documents
+
+If you change the embedding model or need to rebuild the index from scratch, use the Admin Panel:
+
+1. Open the Admin Panel → **Embeddings** tab.
+2. Click **Generate Embeddings** to reprocess all documents currently in the vector store.
+
+Alternatively, use the Django management command:
+
+```bash
+python manage.py rag_manage
+```
+
+<Tip>
+Pass `force_reprocess=True` when calling `sync_and_process_documents()` programmatically to re-chunk and re-embed every file in the download directory, regardless of whether it has changed.
+</Tip>
+
+## UploadedDocument Model Fields
+
+| Field | Type | Description |
+|---|---|---|
+| `file_name` | `CharField` | Original filename including extension |
+| `file_path` | `CharField` | `postgres://<uuid>` or absolute local path |
+| `file_size` | `IntegerField` | File size in bytes |
+| `file_type` | `CharField` | MIME type (e.g. `application/pdf`) |
+| `drive_file_id` | `CharField` | Google Drive file ID (blank for manual uploads) |
+| `processed` | `BooleanField` | Whether chunking has completed |
+| `chunks_created` | `IntegerField` | Number of text chunks generated |
+| `embeddings_generated` | `BooleanField` | Whether embeddings have been stored |
+
+## Document Serving and PDF Deep Linking
+
+Chunks that include a `page` metadata field (PDFs) expose page-level deep links in the `sources` array returned by `/api/rag/query/`. The frontend can construct a URL of the form:
+
+```
+/api/documents/<filename>?token=<JWT>#page=<N>
+```
+
+The `?token=` query parameter is required because PDF iframes cannot send `Authorization` headers. The server validates the token identically to the standard `Bearer` header flow before streaming the file inline.

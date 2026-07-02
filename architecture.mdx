@@ -1,0 +1,242 @@
+---
+title: "System Architecture of NISIRA Assistant"
+sidebarTitle: "Architecture"
+description: "Deep dive into NISIRA Assistant's layered design: React SPA, Django REST API, hybrid RAG pipeline, dual vector store, and Google Drive integration."
+---
+
+NISIRA Assistant is organized as a three-tier system: a React single-page application that users interact with directly, a Django REST API that handles authentication, persistence, and orchestration, and a self-contained RAG sub-package that owns every aspect of document processing and intelligent retrieval. Each tier is independently deployable and communicates exclusively through HTTP and Python function calls — there are no shared in-memory state or coupling between the frontend and the RAG internals.
+
+## High-Level System Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Browser                                                        │
+│  React SPA  (/login · /register · /chat · /chat/:id            │
+│              /admin · /admin/:tabId)                            │
+└─────────────────────────┬───────────────────────────────────────┘
+                          │  HTTPS  JWT Bearer token
+                          ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Django REST API  (backend/api/ + backend/core/)                │
+│  • JWT auth          /api/auth/token/  /api/auth/refresh/       │
+│  • Chat              /api/chat/                                 │
+│  • Conversations     /api/conversations/                        │
+│  • RAG control       /api/rag/*                                 │
+│  • Admin panel       /api/admin/*                               │
+│  • Ratings           /api/ratings/                             │
+│  • Experiments       /api/experiments/                          │
+│  • Documents         /api/documents/<slug>/                     │
+└─────────────────────────┬───────────────────────────────────────┘
+                          │  Python method call
+                          ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  RAG Pipeline  (backend/rag_system/)                            │
+│                                                                 │
+│  EmbeddingManager ──► VectorStore ◄── DriveManager             │
+│  (all-mpnet-base-v2)  (Chroma/pgvector)  (Google Drive)        │
+│                           │                                     │
+│                     Hybrid Search                               │
+│              (semantic 60% + lexical 40%)                       │
+│                           │                                     │
+│                       LLM Client                                │
+│          (Gemini 2.0 Flash / OpenRouter / Groq)                 │
+└─────────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Databases                                                      │
+│  MySQL / PostgreSQL  — conversations, messages, users,          │
+│                        ratings, metrics, documents (binary)     │
+│  ChromaDB / pgvector — 768-dim embeddings + chunk metadata      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Request Flow (Step by Step)
+
+The following numbered sequence traces a single user chat message from the browser to the delivered response:
+
+1. **Authentication** — The React frontend calls `POST /api/auth/token/` with username and password. The server returns a short-lived JWT access token (24 hours) and a refresh token (7 days). Both are stored in `localStorage` and attached automatically as `Authorization: Bearer <token>` by the `frontend/src/services/api.js` interceptor.
+
+2. **Message submission** — The user types a question and the frontend `POST`s to `/api/chat/` with `{ "content": "...", "conversation_id": "<slug or null>" }`. If `conversation_id` is `null`, a new `Conversation` record (with a random URL-safe slug) is created.
+
+3. **Persistence** — The Django view persists the incoming user message to the `Message` model and logs query metadata to `QueryMetrics` for later analysis.
+
+4. **Query reformulation** — `RAGPipeline.query()` checks the recent conversation history. If the question is short, referential ("And how do you configure it?"), or contains demonstrative pronouns without a clear topic, the pipeline calls the LLM with a lightweight reformulation prompt to produce a self-contained search query before retrieval.
+
+5. **Embedding** — `EmbeddingManager` encodes the (possibly reformulated) query into a 768-dimensional vector using `sentence-transformers/all-mpnet-base-v2` running on CPU.
+
+6. **Hybrid search** — The pipeline runs four complementary retrieval strategies concurrently and merges them:
+   - **Semantic search** (weight 0.6): cosine similarity against all stored chunk embeddings.
+   - **Lexical search** (weight 0.4): keyword frequency scoring, either via PostgreSQL full-text search (`search_lexical`) or a fallback ChromaDB scan.
+   - **Metadata search**: filename and document-field keyword matching, with a high boost for exact source-name matches.
+   - **Expansion search**: term-expansion fallback that kicks in when fewer than `top_k` results have been found.
+
+7. **Topic filtering** — If the query contains recognized identifiers (ISO codes, law numbers, NTP standards, COBIT versions, etc.), chunks from unrelated documents are removed before the context is assembled.
+
+8. **Context assembly** — The top-k chunks (3 for citation queries, 5 for general queries) are formatted as `Fuente: <filename>\n<content>` blocks and joined into a single context string.
+
+9. **LLM generation** — The assembled context, conversation history, and original question are injected into the system prompt and sent to the configured LLM. When metrics collection is active, the pipeline uses streaming to capture time-to-first-token (TTFT) in milliseconds.
+
+10. **Response persistence** — The bot's answer and the source list (`file_name`, `page`, `chunk_id`, `similarity_score`, `preview`) are stored as a `Message` record with `sources_json`.
+
+11. **Frontend rendering** — The React chat component renders the response as Markdown, displays source badges, and enables deep-linking to the exact page in the original document through an inline PDF viewer powered by the `/api/documents/<slug>/` binary serving endpoint.
+
+## Backend Structure
+
+The backend is a standard Django project rooted at `backend/` with three top-level packages:
+
+| Package | Role |
+|---|---|
+| `core/` | Django project settings (`settings.py`), root URL configuration, WSGI/ASGI entry points. Auto-detects database engine from environment variables. |
+| `api/` | Django application containing all REST views, serializers, models, URL routing, and the admin panel views. Registers under `/api/` in the root URLconf. |
+| `rag_system/` | Self-contained RAG sub-package. Never imports from `api/`; the API layer calls it as a library. Contains its own `config.py` as a single source of truth for all tuneable parameters. |
+
+### api/ Models
+
+| Model | Purpose |
+|---|---|
+| `Conversation` | Chat session with a random URL-safe `slug`, owner `User` FK, title, and timestamps. |
+| `Message` | Individual turn (`sender`: user/bot), message text, and `sources_json` for RAG citations. |
+| `Rating` | Per-message thumbs-up/down with optional issue tag (irrelevant, hallucination, no evidence, etc.). |
+| `RatingFeedbackEvent` | Async event log for rating lifecycle (pending → completed / failed). |
+| `ExperimentRun` | A/B experiment record storing baseline vs. variant precision, faithfulness, and latency deltas with a guardrail pass/fail flag. |
+| `QueryMetrics` | Per-query performance record: total latency, TTFT, retrieval time, generation time, `top_k`, and complexity score. |
+| `RAGASMetrics` | Custom evaluation scores per query: Precision@k, Recall@k, faithfulness, answer relevancy, hallucination rate, and WER. |
+| `UploadedDocument` | Tracks every ingested file — its path, size, type, Google Drive ID, and embedding status. |
+
+## RAG System Internals
+
+The `rag_system/` package is organized into focused sub-modules, each with a single responsibility:
+
+| Sub-package / File | Role |
+|---|---|
+| `rag_engine/pipeline.py` | `RAGPipeline` class — orchestrates the full retrieve→generate flow, hybrid search strategies, query reformulation, topic filtering, and LLM streaming. |
+| `document_processing/pdf_processor.py` | PDF parsing with PyPDF2 + pdfplumber; extracts text and `page_number` metadata per chunk. |
+| `document_processing/text_processor.py` | DOCX, PPTX, XLSX, and TXT parsing with format-specific chunking strategies. |
+| `embeddings/embedding_manager.py` | Wraps `sentence-transformers/all-mpnet-base-v2`; provides single and batch embedding creation with an in-process cache. |
+| `vector_store/chroma_manager.py` | ChromaDB client — creates and manages the `rag_documents` collection with cosine distance; used by default in local development. |
+| `vector_store/postgres_store.py` | PostgreSQL pgvector client — provides `search_similar`, `search_lexical`, `search_by_metadata`, and `get_all_documents` for production deployments. |
+| `drive_sync/drive_manager.py` | Google Drive polling: authenticates via service account or OAuth2, lists files in the configured folder, downloads changed files, and triggers ingestion. |
+| `config.py` | Central configuration dictionary for all chunking parameters, embedding settings, LLM provider details, vector store backend selection, and retrieval weights. |
+
+### Chunking Strategy
+
+Chunk sizes are configured per document type in `config.py` to optimize retrieval quality:
+
+| Format | Chunk size (chars) | Overlap (chars) | Min size (chars) |
+|---|---|---|---|
+| `.pdf` | 1,300 | 260 | 180 |
+| `.docx` | 1,300 | 260 | 180 |
+| `.txt` | 1,100 | 220 | 150 |
+| default | 1,000 | 200 | 100 |
+
+## Dual Vector Store
+
+The pipeline selects its vector backend at startup by reading the `VECTOR_STORE_BACKEND` environment variable and the presence of `DATABASE_URL`:
+
+```
+VECTOR_STORE_BACKEND=postgres   →   PostgresVectorStore (production)
+VECTOR_STORE_BACKEND=chroma     →   ChromaManager (local dev)
+postgres + no DATABASE_URL      →   falls back to ChromaDB automatically
+```
+
+**ChromaDB** stores embeddings in a local directory (`backend/chroma_db/`) mounted as a Docker volume. It requires no additional infrastructure and is the default for `docker-compose.yml`.
+
+**PostgreSQL pgvector** stores embeddings as `vector(768)` columns alongside full-text-search indexes. This backend enables native `search_lexical` queries using PostgreSQL's `ts_vector`/`ts_query` operators, eliminating the need for the Python-side fallback lexical scan. It is the default for `docker-compose.production.yml`.
+
+The `RAGPipeline` accesses both backends through a unified interface — `search_similar`, `add_documents`, `list_all_documents`, `reset_collection` — so the rest of the pipeline code is backend-agnostic.
+
+## LLM Providers
+
+The active provider is selected by the `LLM_PROVIDER` environment variable. Changing it requires only an `.env` update and a container restart.
+
+| Provider key | Default model | Required env var | Notes |
+|---|---|---|---|
+| `google` | `gemini-2.0-flash-exp` | `GOOGLE_API_KEY` | Uses `langchain-google-genai`; supports streaming for TTFT measurement. |
+| `openrouter` | `google/gemma-2-9b-it` | `OPENROUTER_API_KEY` | Uses `langchain-openai` pointed at `https://openrouter.ai/api/v1`. Model overridable via `LLM_MODEL_OPENROUTER`. |
+| `groq` | `llama-3.3-70b-versatile` | `GROQ_API_KEY` | Uses `langchain-groq`; fast inference for latency-sensitive deployments. Model overridable via `LLM_MODEL_GROQ`. |
+
+All providers share the same generation settings: temperature 0.4, max response tokens 1,500, and a structured Spanish-language system prompt that instructs the LLM to answer naturally, cite sources inline, and acknowledge when information is not available.
+
+## Database Strategy
+
+NISIRA Assistant uses Django's ORM and `dj-database-url` to support two database backends without any code changes:
+
+| Environment | Engine | Compose file | Vector store |
+|---|---|---|---|
+| Local development | MySQL 8.0 | `docker-compose.yml` | ChromaDB |
+| Production | PostgreSQL + pgvector | `docker-compose.production.yml` | pgvector |
+
+`core/settings.py` reads `DATABASE_URL` (or the individual `DB_*` variables) at startup and configures Django's `DATABASES` dict accordingly. The `psycopg2-binary` and `mysql-connector-python` drivers are both present in `requirements.txt` so either engine works without reinstalling dependencies.
+
+## Authentication Flow
+
+NISIRA Assistant uses JSON Web Tokens via `djangorestframework-simplejwt`:
+
+1. **Login** — `POST /api/auth/login/` (custom view) or `POST /api/auth/token/` (standard simplejwt view). Returns `{ "access": "...", "refresh": "..." }`.
+2. **Token storage** — The frontend stores both tokens in `localStorage` and reads the `user` payload from the access token to determine role.
+3. **Authenticated requests** — Every protected API call includes `Authorization: Bearer <access_token>`. Django middleware validates the signature and expiry.
+4. **Token refresh** — When the access token expires, the frontend calls `POST /api/auth/refresh/` with the refresh token to receive a new access token.
+5. **Role-based routing** — The React `ProtectedRoute` component reads `localStorage` for the token and checks whether `user.username === 'admin'`. Admin users can access `/admin` and `/admin/:tabId`; regular users are redirected to `/chat`.
+
+| Token | Default lifetime |
+|---|---|
+| Access token | 24 hours |
+| Refresh token | 7 days |
+
+## Frontend Routing
+
+The React app uses React Router v7 with real URL paths and full SPA rewrite rules (`vercel.json` and `Procfile` both rewrite `/*` to `index.html`).
+
+| Route | Component | Access |
+|---|---|---|
+| `/` | `HomeRedirect` | Public — redirects to `/login`, `/chat`, or `/admin` based on auth state and role. |
+| `/login` | `Login` | Public |
+| `/register` | `Register` | Public |
+| `/chat` | `Chat` | Authenticated users |
+| `/chat/:conversationId` | `Chat` | Authenticated users — loads conversation by slug. |
+| `/admin` | `AdminPanel` | Admin only |
+| `/admin/:tabId` | `AdminPanel` | Admin only — deep-links to a specific tab (embeddings, metrics, drive, pipeline). |
+| `*` | — | Redirects to `/` |
+
+## Admin Panel API Endpoints
+
+The React Admin Panel communicates with a dedicated set of admin-only endpoints under `/api/admin/`. These require a valid admin JWT token and are not accessible to regular users.
+
+| Endpoint group | Endpoints |
+|---|---|
+| Google Drive | `GET /api/admin/drive/files/`, `POST /api/admin/drive/upload/`, `DELETE /api/admin/drive/delete/<file_id>/`, `POST /api/admin/drive/sync/`, `GET /api/admin/drive/sync/progress/` |
+| Embeddings | `GET /api/admin/embeddings/status/`, `POST /api/admin/embeddings/generate/`, `POST /api/admin/embeddings/verify/`, `POST /api/admin/embeddings/clear/`, `GET /api/admin/embeddings/progress/`, `GET /api/admin/embeddings/processed/`, `DELETE /api/admin/embeddings/delete/<file_name>/` |
+| Metrics | `GET /api/admin/metrics/`, `GET /api/admin/metrics/queries/`, `GET /api/admin/metrics/queries/<query_id>/`, `GET /api/admin/metrics/ratings/` |
+| Pipeline | `GET /api/admin/pipeline/status/` |
+
+<CardGroup cols={2}>
+  <Card
+    title="RAG Pipeline"
+    icon="magnifying-glass"
+    href="/features/rag-pipeline"
+  >
+    Detailed documentation of hybrid search, adaptive top-k, topic filtering, and query reformulation.
+  </Card>
+  <Card
+    title="LLM Providers"
+    icon="microchip"
+    href="/configuration/llm-providers"
+  >
+    How to configure Gemini, OpenRouter, and Groq — including model overrides and temperature tuning.
+  </Card>
+  <Card
+    title="Docker Deployment"
+    icon="docker"
+    href="/deployment/docker"
+  >
+    Production setup with PostgreSQL, pgvector, Nginx reverse proxy, and SSL via Certbot.
+  </Card>
+  <Card
+    title="Environment Variables"
+    icon="gear"
+    href="/configuration/environment-variables"
+  >
+    Full reference for every backend and frontend environment variable.
+  </Card>
+</CardGroup>

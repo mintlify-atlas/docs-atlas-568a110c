@@ -1,0 +1,122 @@
+{
+  "projectType": "saas",
+  "projectName": "NISIRA Assistant",
+  "projectDescription": "A full-stack RAG (Retrieval-Augmented Generation) conversational assistant that lets users ask questions against an internal document corpus, powered by a Django REST API backend, React SPA frontend, and a hybrid semantic + lexical retrieval pipeline with optional Google Drive document sync.",
+  "theme": "luma",
+  "primaryColor": "#2563EB",
+  "lightColor": "#EFF6FF",
+  "darkColor": "#1E3A8A",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "architecture"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/environment-variables",
+              "configuration/llm-providers",
+              "configuration/rag-settings"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/docker",
+              "deployment/digital-ocean",
+              "deployment/production-checklist"
+            ]
+          },
+          {
+            "group": "Features",
+            "pages": [
+              "features/rag-pipeline",
+              "features/document-ingestion",
+              "features/google-drive-sync",
+              "features/adaptive-retrieval",
+              "features/metrics-evaluation"
+            ]
+          },
+          {
+            "group": "Administration",
+            "pages": [
+              "admin/admin-panel",
+              "admin/managing-documents",
+              "admin/monitoring"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "api-reference/overview",
+              "api-reference/authentication"
+            ]
+          },
+          {
+            "group": "Endpoints",
+            "pages": [
+              "api-reference/chat",
+              "api-reference/conversations",
+              "api-reference/rag",
+              "api-reference/ratings",
+              "api-reference/admin-endpoints"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Hybrid RAG pipeline combining 60% semantic (pgvector / ChromaDB) and 40% lexical search",
+    "Adaptive top-k document retrieval (3–15 docs) based on query complexity",
+    "Multi-provider LLM support: Gemini 2.0 Flash, OpenRouter, and Groq",
+    "Google Drive document sync with automatic ingestion (PDF, DOCX, PPTX, XLSX, TXT)",
+    "Conversational memory with LLM-based query reformulation",
+    "Custom RAG evaluation metrics: Precision@k, Recall@k, Faithfulness, Hallucination Rate, WER",
+    "JWT authentication with access/refresh token rotation",
+    "React SPA with role-based routing (admin vs. regular user)",
+    "React admin panel for document management, embeddings, and system metrics",
+    "Dual vector store: PostgreSQL pgvector (production) and ChromaDB (local development)"
+  ],
+  "publicApiSurface": [
+    "POST /api/auth/login/",
+    "POST /api/auth/register/",
+    "POST /api/auth/token/",
+    "POST /api/auth/refresh/",
+    "GET /api/conversations/",
+    "POST /api/conversations/create/",
+    "GET /api/conversations/<conversation_id>/messages/",
+    "DELETE /api/conversations/<conversation_id>/delete/",
+    "POST /api/chat/",
+    "GET /api/rag/status/",
+    "POST /api/rag/initialize/",
+    "POST /api/rag/sync/",
+    "POST /api/rag/query/",
+    "POST /api/rag/chat/",
+    "GET /api/rag/system-status/",
+    "GET /api/documents/<filename>/",
+    "POST /api/ratings/",
+    "GET /api/ratings/summary/",
+    "GET /api/ratings/export/",
+    "GET /api/experiments/",
+    "POST /api/experiments/create/",
+    "GET /api/guardrails/status/",
+    "GET /api/admin/metrics/",
+    "GET /api/admin/embeddings/status/",
+    "POST /api/admin/embeddings/generate/",
+    "GET /api/health/"
+  ]
+}

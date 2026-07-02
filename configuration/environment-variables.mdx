@@ -1,0 +1,175 @@
+---
+title: "Environment Variables Reference for NISIRA Assistant"
+sidebarTitle: "Env Variables"
+description: "Complete reference for all backend and frontend environment variables: Django settings, database, LLM API keys, Google Drive credentials, and Gunicorn tuning."
+---
+
+NISIRA Assistant is configured entirely through environment variables — there are no hard-coded secrets in the codebase. The backend reads a `.env` file at startup via `python-dotenv`, while the production deployment (Docker / DigitalOcean App Platform) injects variables directly into the runtime environment. The sections below document every supported variable, its default value, and when it is required.
+
+---
+
+## Django Core
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `SECRET_KEY` / `DJANGO_SECRET_KEY` | **Yes (prod)** | Insecure fallback | Django's cryptographic signing key. Generate a long random string for every production deployment and keep it secret. |
+| `DEBUG` | No | `True` | Set to `False` in production. When `True`, Django returns verbose error pages and disables several security hardening checks. |
+| `ALLOWED_HOSTS` | No | Auto-detected | Comma-separated list of hostnames Django will serve (e.g. `your-domain.com,www.your-domain.com,1.2.3.4`). If omitted, the backend auto-detects the environment: Heroku (`DYNO`), Railway (`RAILWAY_ENVIRONMENT_NAME`), or falls back to `localhost,127.0.0.1`. |
+| `DJANGO_SETTINGS_MODULE` | No | `core.settings` | Fully qualified settings module. Set to `core.production_settings` when deploying to DigitalOcean App Platform or any environment that uses a dedicated production settings file. |
+
+<Warning>
+  Never commit `SECRET_KEY` to source control. In production, treat it the same
+  as a database password: rotate it if it is ever exposed.
+</Warning>
+
+---
+
+## Database
+
+Django resolves the active database using a three-tier strategy, evaluated in order:
+
+1. **`DATABASE_URL`** (PostgreSQL URI) — used by Railway, Heroku, and DigitalOcean managed databases.
+2. **MySQL individual variables** — used when `DB_ENGINE=mysql` is set, typically for local development with a MySQL server.
+3. **SQLite fallback** — automatic when neither of the above is present; suitable only for quick local testing.
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `DATABASE_URL` | Prod | — | Full PostgreSQL connection URI, e.g. `postgresql://user:pass@host:5432/dbname`. When present, all individual `DB_*` variables are ignored. |
+| `DB_ENGINE` | No | — | Set to `mysql` to activate the MySQL path. Omit when using `DATABASE_URL`. |
+| `DB_NAME` | No | `rag_asistente` | MySQL database name. |
+| `DB_USER` | No | `root` | MySQL user. |
+| `DB_PASSWORD` | No | _(empty)_ | MySQL password. |
+| `DB_HOST` | No | `localhost` | MySQL host. |
+| `DB_PORT` | No | `3306` | MySQL port. |
+
+<Info>
+  The `DATABASE_URL` format accepted by `dj-database-url` supports SSL options:
+  append `?sslmode=require` when connecting to a remote managed database over an
+  untrusted network.
+</Info>
+
+---
+
+## LLM Providers
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `LLM_PROVIDER` | No | `openrouter` | Active generation backend. Accepted values: `openrouter`, `google`, `groq`. |
+| `GOOGLE_API_KEY` | Conditional | — | Required when `LLM_PROVIDER=google`. Also used by the Gemini embedding model regardless of the active LLM provider. |
+| `LLM_MODEL_GEMINI` | No | `gemini-2.0-flash-exp` | Gemini model name for both chat and embeddings when using the Google provider. |
+| `OPENROUTER_API_KEY` | Conditional | — | Required when `LLM_PROVIDER=openrouter`. |
+| `LLM_MODEL_OPENROUTER` | No | `google/gemma-2-9b-it` | OpenRouter model slug. Any model listed on [openrouter.ai/models](https://openrouter.ai/models) is valid. |
+| `OPENROUTER_BASE_URL` | No | `https://openrouter.ai/api/v1` | OpenRouter API base URL. Override only if routing through a proxy. |
+| `GROQ_API_KEY` | Conditional | — | Required when `LLM_PROVIDER=groq`. |
+| `LLM_MODEL_GROQ` | No | `llama-3.3-70b-versatile` | Groq model identifier. |
+| `GROQ_BASE_URL` | No | `https://api.groq.com/openai/v1` | Groq API base URL. |
+| `LLM_MAX_TOKENS` | No | `8192` | Maximum tokens the model may generate per request. Applies to the Gemini provider; individual RAG responses are further capped by `max_response_tokens` (1500) in the generation config. |
+
+---
+
+## Embeddings
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `EMBEDDING_MODEL` | No | `sentence-transformers/all-mpnet-base-v2` | HuggingFace model ID used for local embedding inference. This 768-dimensional model is used as the fallback when Google embeddings are unavailable. |
+| `EMBEDDING_DEVICE` | No | `cpu` | Inference device for the local embedding model. Set to `cuda` if a compatible GPU is available to accelerate document indexing. |
+| `GEMINI_EMBEDDING_MODEL` | No | `models/text-embedding-004` | Google embedding model used in production when `GOOGLE_API_KEY` is set. |
+| `VECTOR_STORE_BACKEND` | No | `postgres` | Vector storage engine. `postgres` uses pgvector on the existing PostgreSQL database; `chroma` runs a local ChromaDB instance (recommended for development). |
+
+---
+
+## Google Drive
+
+Google Drive integration is **disabled by default** and must be explicitly enabled. When enabled, the backend periodically syncs documents from a specified Drive folder into the RAG document store.
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `ENABLE_GOOGLE_DRIVE` | No | `false` | Set to `true` to activate Drive sync. When `false`, all other `GOOGLE_DRIVE_*` variables are ignored at runtime. |
+| `GOOGLE_DRIVE_FOLDER_ID` | Conditional | — | Google Drive folder ID to sync. Find it in the folder's URL: `https://drive.google.com/drive/folders/<FOLDER_ID>`. |
+| `GOOGLE_DRIVE_FOLDER_NAME` | No | _(empty)_ | Optional human-readable folder name used for display purposes. |
+| `GOOGLE_CREDENTIALS_JSON` | Conditional | — | Service account credentials as a single-line JSON string. If provided and `credentials.json` does not exist on disk, the backend writes it automatically at startup. Mark as **Encrypted** in DigitalOcean. |
+| `GOOGLE_TOKEN_JSON` | No | — | OAuth2 user token as a single-line JSON string. Written to `data/token.json` automatically when provided. Used for OAuth-based (non-service-account) authentication flows. |
+| `GOOGLE_DRIVE_SYNC_INTERVAL` | No | `300` | Polling interval in seconds between Drive sync cycles. |
+
+<Warning>
+  `GOOGLE_CREDENTIALS_JSON` contains your service account private key. Always
+  mark this variable as **Encrypted / Secret** in your deployment platform's
+  environment variable UI and never log its value.
+</Warning>
+
+---
+
+## Server / Gunicorn
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `PORT` | No | `8000` | Port Gunicorn binds to. DigitalOcean App Platform injects this automatically; override only when running behind a custom reverse proxy. |
+| `GUNICORN_WORKERS` | No | `2` | Number of Gunicorn worker processes. A common formula is `2 * CPU_cores + 1`; the production example file uses `4` for a typical 2-vCPU droplet. |
+| `GUNICORN_TIMEOUT` | No | `300` | Worker timeout in seconds. Set high (300 s) to accommodate long-running RAG inference requests that may take several seconds per query. |
+
+---
+
+## Security (Production)
+
+These variables are only meaningful when `DEBUG=False`. They are ignored in local development.
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `CORS_ALLOWED_ORIGINS` | Prod | — | Comma-separated list of origins allowed to make cross-origin requests, e.g. `https://your-domain.com,https://www.your-domain.com`. |
+| `SECURE_SSL_REDIRECT` | No | `False` | When `True`, Django redirects all HTTP requests to HTTPS. Enable in production behind an SSL terminator. |
+| `SESSION_COOKIE_SECURE` | No | `False` | When `True`, the session cookie is only sent over HTTPS connections. |
+| `CSRF_COOKIE_SECURE` | No | `False` | When `True`, the CSRF cookie is only sent over HTTPS connections. |
+
+---
+
+## Frontend
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `REACT_APP_API_URL` | **Yes** | `http://localhost:8000` | Full URL of the Django backend API. The React app prefixes all `/api/` requests with this value. In DigitalOcean App Platform, set this to `${backend.PUBLIC_URL}` so it resolves automatically. |
+
+---
+
+## Minimal Development `.env`
+
+The following snippet covers the minimum variables needed to run the full stack locally using ChromaDB and the OpenRouter LLM provider:
+
+```bash
+# backend/.env
+DEBUG=true
+ENVIRONMENT=local
+DJANGO_SECRET_KEY=local-dev-key-not-for-production
+
+# Database — SQLite fallback used when DATABASE_URL is absent
+# DATABASE_URL=postgresql://postgres:password@localhost:5432/nisira_local
+
+# Vector store — ChromaDB is simpler for local development
+VECTOR_STORE_BACKEND=chroma
+
+# LLM
+LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY=sk-or-v1-your-key-here
+
+# Embeddings (optional — overrides model default)
+# EMBEDDING_MODEL=sentence-transformers/all-mpnet-base-v2
+# EMBEDDING_DEVICE=cpu
+
+# Google Drive (disabled by default)
+ENABLE_GOOGLE_DRIVE=false
+
+# CORS
+ALLOWED_HOSTS=localhost,127.0.0.1
+CORS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+```
+
+```bash
+# frontend/.env
+REACT_APP_API_URL=http://localhost:8000
+```
+
+<Tip>
+  Copy `backend/.env.local.example` to `backend/.env` and fill in your API keys
+  to get started. For production, copy `.env.production.example` to
+  `.env.production` at the repository root and update every `CHANGE_ME` value
+  before deploying.
+</Tip>

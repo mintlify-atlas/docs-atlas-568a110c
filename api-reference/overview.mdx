@@ -1,0 +1,185 @@
+---
+title: "NISIRA Assistant REST API Reference Overview"
+sidebarTitle: "Overview"
+description: "All API endpoints are prefixed with /api/. Authentication uses JWT Bearer tokens. Responses are JSON. Covers chat, RAG, conversations, ratings, experiments, and admin."
+---
+
+The NISIRA Assistant REST API is a Django REST Framework backend that powers a full-stack Retrieval-Augmented Generation (RAG) chat application. Every endpoint lives under the `/api/` prefix, all responses are JSON, and all protected routes require a JWT Bearer token in the `Authorization` header. The sections below describe the available resource groups, the welcome and utility endpoints, and the error conventions you should expect across the entire API surface.
+
+## Base URL
+
+```
+/api/
+```
+
+The base URL is relative. The full URL depends on your deployment target:
+
+| Environment | Example base URL |
+|---|---|
+| Local development | `http://localhost:8000/api/` |
+| Railway (production) | `https://nisira-assistant-production-6a02.up.railway.app/api/` |
+
+<Note>
+  Set `REACT_APP_API_URL` (or `REACT_APP_API_BASE`) in your frontend environment to point the client at the correct host. The frontend axios client uses a default of `http://localhost:8000` when neither variable is set.
+</Note>
+
+## Authentication
+
+All endpoints that handle user data require a JSON Web Token. Obtain a token via the [Authentication](/api-reference/authentication) endpoints, then attach it to every subsequent request:
+
+```
+Authorization: Bearer <access_token>
+```
+
+Token lifetimes: **access token — 24 hours**, **refresh token — 7 days**. The refresh token is rotated on every successful refresh. See the [Authentication](/api-reference/authentication) page for the full flow.
+
+## Response Format
+
+All responses — success and error alike — are JSON objects. HTTP status codes follow REST conventions:
+
+| Code | Meaning |
+|---|---|
+| `200 OK` | Request succeeded |
+| `201 Created` | Resource created successfully |
+| `400 Bad Request` | Validation error or missing required field |
+| `401 Unauthorized` | Missing or invalid JWT token |
+| `403 Forbidden` | Authenticated but not permitted (e.g. non-staff access to admin routes) |
+| `404 Not Found` | Resource does not exist or does not belong to the authenticated user |
+| `500 Internal Server Error` | Unexpected server-side failure |
+
+Error bodies use one of two shapes:
+
+```json
+{ "error": "Descriptive message" }
+```
+
+```json
+{ "detail": "Descriptive message" }
+```
+
+## Client Timeout
+
+RAG queries involve embedding lookups and LLM generation — these operations can take up to **2 minutes**. The official frontend client is configured with a 120-second timeout for standard requests and 180 seconds for RAG-enhanced chat. Set your HTTP client timeout accordingly before calling `/api/rag/query/` or `/api/rag/chat/`.
+
+## Welcome & Utility Endpoints
+
+These endpoints require no authentication and are useful for health checks, deployment verification, and service discovery.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/` | Returns API version, status `"operational"`, and a map of key endpoint paths |
+| `GET` | `/api/health/` | Lightweight health check — returns `{"status": "healthy"}` and a timestamp |
+| `GET` | `/api/info/` | Returns API name, version, description, and an endpoint directory |
+| `GET` | `/api/status/` | Aggregated service status with component health checks and build metadata |
+
+```bash
+curl http://localhost:8000/api/health/
+```
+
+```json
+{
+  "status": "healthy",
+  "timestamp": "2024-11-15T10:23:01.456789",
+  "message": "API funcionando correctamente"
+}
+```
+
+## API Groups
+
+<CardGroup cols={2}>
+  <Card title="Authentication" icon="key" href="/api-reference/authentication">
+    Register new users, log in, obtain JWT token pairs, and refresh access tokens. All authentication endpoints allow unauthenticated access.
+  </Card>
+  <Card title="Chat" icon="message" href="/api-reference/chat">
+    Send messages to a conversation and receive an assistant reply. The primary endpoint is `POST /api/chat/`, with a RAG-powered variant at `POST /api/rag/chat/`.
+  </Card>
+  <Card title="Conversations" icon="comments" href="/api-reference/conversations">
+    Create, list, retrieve messages from, and delete conversation threads. Conversations are identified by a public slug or a legacy numeric ID.
+  </Card>
+  <Card title="RAG" icon="brain" href="/api-reference/rag">
+    Initialize the RAG pipeline, sync documents from Google Drive, run direct retrieval queries, trigger enhanced chat, and inspect pipeline health.
+  </Card>
+  <Card title="Ratings" icon="star" href="/api-reference/ratings">
+    Submit thumbs-up / thumbs-down ratings on assistant messages, retrieve aggregated summaries, and export rating data as JSON or CSV.
+  </Card>
+  <Card title="Admin Endpoints" icon="shield" href="/api-reference/admin-endpoints">
+    Admin-only routes covering Google Drive file management, embedding generation and verification, system metrics, query logs, and pipeline status.
+  </Card>
+</CardGroup>
+
+### Auth
+
+The auth group (`/api/auth/`) handles user identity. All four routes accept unauthenticated requests.
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/auth/register/` | Create a new user account |
+| `POST` | `/api/auth/login/` | Log in and receive JWT tokens plus user info |
+| `POST` | `/api/auth/token/` | Standard JWT obtain-pair endpoint (username + password → access + refresh) |
+| `POST` | `/api/auth/refresh/` | Exchange a refresh token for a new access token |
+
+### Chat
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/chat/` | Send a message to an existing conversation; returns a basic assistant reply |
+
+### Conversations
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/conversations/` | List the authenticated user's conversations (paginated) |
+| `POST` | `/api/conversations/create/` | Create a new conversation thread |
+| `GET` | `/api/conversations/<conversation_id>/messages/` | Retrieve paginated messages for a conversation |
+| `DELETE` | `/api/conversations/<conversation_id>/delete/` | Permanently delete a conversation and all its messages |
+
+`<conversation_id>` accepts either a short alphanumeric **slug** (preferred) or a legacy **numeric ID**.
+
+### RAG
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/rag/status/` | Required | RAG pipeline readiness and component check |
+| `POST` | `/api/rag/initialize/` | Required | Initialize (or re-initialize) the RAG pipeline |
+| `POST` | `/api/rag/sync/` | Required | Sync documents from Google Drive and build embeddings |
+| `POST` | `/api/rag/query/` | Optional | Direct retrieval query with adaptive top-k document selection |
+| `POST` | `/api/rag/chat/` | Required | RAG-enhanced chat — retrieves context then generates a response |
+| `GET` | `/api/rag/system-status/` | Optional | Detailed system status from the pipeline |
+
+<Note>
+  `POST /api/rag/query/` is the only RAG endpoint decorated with `AllowAny`. All other RAG endpoints require a valid Bearer token.
+</Note>
+
+### Documents
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/documents/<filename>/` | Serve a stored document (PDF, etc.) inline — accepts JWT via `Authorization` header or `?token=` query parameter |
+
+### Ratings
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/ratings/` | Required | Submit or update a rating for an assistant message |
+| `GET` | `/api/ratings/summary/` | Staff only | Aggregated rating statistics and recent feedback |
+| `GET` | `/api/ratings/export/` | Staff only | Export ratings as JSON or CSV (`?export_format=csv\|json`) |
+
+### Experiments & Guardrails
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/experiments/` | Staff only | List all A/B experiment runs |
+| `GET` | `/api/experiments/latest/` | Staff only | Retrieve the most recent experiment run |
+| `POST` | `/api/experiments/create/` | Staff only | Record a new experiment run with baseline vs. variant metrics |
+| `GET` | `/api/guardrails/status/` | Staff only | Evaluate guardrail thresholds across satisfaction rate and feedback queue |
+
+### Admin
+
+All `/api/admin/*` routes require `is_staff = True` on the authenticated user.
+
+| Group | Paths |
+|---|---|
+| **Drive** | `admin/drive/files/`, `admin/drive/upload/`, `admin/drive/delete/<file_id>/`, `admin/drive/sync/`, `admin/drive/sync/progress/` |
+| **Embeddings** | `admin/embeddings/status/`, `admin/embeddings/generate/`, `admin/embeddings/verify/`, `admin/embeddings/clear/`, `admin/embeddings/progress/`, `admin/embeddings/processed/`, `admin/embeddings/delete/<file_name>/` |
+| **Metrics** | `admin/metrics/`, `admin/metrics/queries/`, `admin/metrics/queries/<query_id>/`, `admin/metrics/ratings/` |
+| **Pipeline** | `admin/pipeline/status/` |

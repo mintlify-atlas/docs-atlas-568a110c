@@ -1,0 +1,87 @@
+---
+title: "NISIRA Assistant: RAG-Powered Conversational AI for Documents"
+sidebarTitle: "Introduction"
+description: "NISIRA Assistant answers questions from your document corpus with hybrid semantic and lexical search, a pluggable LLM backend, and cited, grounded responses."
+---
+
+NISIRA Assistant is a production-ready, full-stack Retrieval-Augmented Generation (RAG) application purpose-built for organizations that need to make large internal document libraries conversationally queryable. Instead of forcing users to manually search through PDFs, Word documents, spreadsheets, and presentations, NISIRA Assistant lets them ask natural-language questions and receive precise, cited answers drawn directly from the source material — with clickable references linked to the exact page in the original file.
+
+## What It Is
+
+At its core, NISIRA Assistant is a question-answering system backed by a corpus of your own documents. Upload or sync files in PDF, DOCX, PPTX, XLSX, or TXT format; the system chunks, embeds, and indexes every page. When a user types a question, the pipeline retrieves the most contextually relevant passages and passes them to a large language model together with the question. The LLM generates a grounded, conversational answer in Spanish, citing each source it drew upon.
+
+The application ships as a single `docker-compose.yml` that starts a MySQL database, a Django REST API backend on port 8000, and a React SPA frontend on port 3000 — a fully working local environment in one command. A separate production compose file switches MySQL for PostgreSQL with the `pgvector` extension and adds an Nginx reverse proxy.
+
+## Core Architecture
+
+NISIRA Assistant is organized into three distinct layers that communicate through well-defined interfaces:
+
+**React SPA (frontend)** — A Create React App single-page application using React Router v7. Authenticated users land on `/chat` for conversation, while admin users are redirected to `/admin` where they can manage document ingestion, monitor embeddings, and review RAGAS-style evaluation metrics. All API calls carry JWT Bearer tokens attached automatically by the `api.js` service layer.
+
+**Django REST API (backend/api/)** — Exposes every endpoint under `/api/`. Handles JWT authentication via `djangorestframework-simplejwt`, persists conversations and messages in the relational database, stores uploaded documents as binary blobs served through random public slugs at `/api/documents/<slug>/`, and delegates every RAG operation to the `rag_system` sub-package.
+
+**RAG Pipeline (backend/rag_system/)** — An entirely self-contained Python module orchestrated by `rag_engine/pipeline.py`. It manages document ingestion, embedding generation with `sentence-transformers/all-mpnet-base-v2` (768-dimensional vectors), storage in a dual vector backend (ChromaDB for local dev, PostgreSQL pgvector for production), and multi-provider LLM generation.
+
+## How a Request Flows
+
+Every chat message travels through the following stages before the user sees a response:
+
+1. The React frontend `POST`s the message content to `/api/chat/` with a JWT Bearer token in the `Authorization` header.
+2. The Django view authenticates the request, persists the user message, and hands the question to `RAGPipeline.query()`.
+3. The pipeline optionally **reformulates** the query using recent conversation history so that follow-up questions like "And how do you install it?" are resolved to "How do you install \<topic from previous turn\>?" before retrieval.
+4. The query text is embedded into a 768-dimensional vector by `EmbeddingManager` using `all-mpnet-base-v2`.
+5. **Hybrid search** runs in parallel: a semantic vector similarity search against ChromaDB or pgvector (weighted 60 %) and a lexical keyword search (weighted 40 %). Results are merged, de-duplicated, scored, and diversified.
+6. A topic-relevance filter removes chunks whose document identifiers (ISO numbers, law codes, etc.) do not match the identifiers detected in the question.
+7. The top-k chunks are assembled into a context window and injected into a structured prompt together with the original question and conversation history.
+8. The chosen LLM (Gemini 2.0 Flash, OpenRouter, or Groq) generates a natural-language answer in Spanish with inline source citations.
+9. The Django view persists the bot message (with sources stored as JSON), and the response — including `sources` with `file_name`, `page`, and `chunk_id` — is returned to the frontend.
+10. The React chat interface renders the Markdown response and presents clickable source badges that deep-link to the relevant page in an embedded PDF viewer.
+
+## Key Capabilities
+
+**Hybrid semantic + lexical search** — Vector similarity alone can miss exact-term matches (author names, regulation codes, acronyms). NISIRA Assistant merges cosine-similarity results with BM25-style lexical scoring and applies document-identifier filtering so that a query about "ISO 27001" never surfaces chunks from an unrelated "ISO 31000" document.
+
+**Adaptive top-k retrieval** — The pipeline auto-detects citation queries (e.g., "Arias (2020)") and narrows `top_k` to 3 for high-precision lookups, versus 5 for broader thematic queries. Configurable weights and thresholds live in `rag_system/config.py`.
+
+**Multi-provider LLM backend** — Switch between Gemini 2.0 Flash (`google`), any model on OpenRouter (`openrouter`), and Groq's Llama 3 70B (`groq`) by changing a single environment variable. The pipeline falls back gracefully to retrieval-only mode when no API key is configured.
+
+**Google Drive sync** — Optionally point the system at a Google Drive folder; a polling sync manager downloads new and updated files, processes them, and adds their embeddings to the vector store automatically.
+
+**Custom evaluation metrics** — Every query records latency (total, embedding, retrieval, generation, TTFT), Precision@k, Recall@k, faithfulness score, answer relevancy, hallucination rate, and Word Error Rate against the `QueryMetrics` and `RAGASMetrics` Django models. An `ExperimentRun` model tracks A/B variants with guardrail enforcement.
+
+**Per-message ratings** — Users can like or dislike any bot response and optionally tag it with an issue label (irrelevant, no evidence, hallucination, etc.). Aggregated rating statistics are accessible in the admin panel and via `/api/ratings/summary/`.
+
+## Who It's For
+
+NISIRA Assistant is designed for teams and organizations that maintain structured document corpora — compliance manuals, ERP documentation, regulatory frameworks, academic reference libraries, technical handbooks — and need fast, auditable answers rather than manual search. The default system prompt is tuned for ERP documentation (specifically the NISIRA ERP platform), but the LLM prompt, chunking strategy, and embedding model are all configurable for any domain.
+
+<CardGroup cols={2}>
+  <Card
+    title="Quickstart"
+    icon="rocket"
+    href="/quickstart"
+  >
+    Run the full stack locally in under 10 minutes with Docker Compose and send your first RAG query.
+  </Card>
+  <Card
+    title="Architecture"
+    icon="sitemap"
+    href="/architecture"
+  >
+    Deep dive into the layered system design: API, RAG pipeline, vector store, and auth flow.
+  </Card>
+  <Card
+    title="Environment Variables"
+    icon="gear"
+    href="/configuration/environment-variables"
+  >
+    All backend and frontend configuration options, from LLM keys to vector store backends.
+  </Card>
+  <Card
+    title="API Reference"
+    icon="code"
+    href="/api-reference/overview"
+  >
+    Complete reference for every REST endpoint: chat, RAG, admin, ratings, and experiments.
+  </Card>
+</CardGroup>

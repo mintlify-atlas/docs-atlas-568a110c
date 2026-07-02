@@ -1,0 +1,156 @@
+---
+title: "Chat API: Send Messages to the RAG Assistant"
+sidebarTitle: "Chat"
+description: "POST /api/chat/ to send a message. The backend runs the full RAG pipeline and returns an answer with source citations. Requires JWT authentication."
+---
+
+The Chat API is the primary entry point for user interactions with the NISIRA Assistant. When a message is submitted, the backend calculates an adaptive top-k retrieval depth based on the complexity and length of the question, retrieves the most relevant document chunks from the vector store, and streams a grounded LLM-generated answer back alongside source citations. All requests require a valid JWT Bearer token.
+
+## POST /api/chat/
+
+Send a user message and receive an AI-generated response backed by the RAG pipeline. If no `conversation_id` is provided, a new conversation is automatically created and its slug is returned in the response.
+
+<Note>
+  The retrieval depth is automatically determined by `calculate_adaptive_top_k()`. Short queries (under 50 characters) retrieve 3–5 documents; long or multi-question queries can retrieve up to 12–15 documents. You can override this on the RAG query endpoint using an explicit `top_k` parameter.
+</Note>
+
+### Request
+
+**Endpoint:** `POST /api/chat/`
+
+**Authentication:** `Authorization: Bearer <access_token>`
+
+<ParamField body="content" type="string" required>
+  The user's question or message. Must be a non-empty string. Whitespace is stripped automatically.
+</ParamField>
+
+<ParamField body="conversation_id" type="string">
+  The slug (preferred) or legacy numeric ID of an existing conversation to append the message to. Pass `null` or omit this field to start a new conversation automatically.
+</ParamField>
+
+### Response
+
+<ResponseField name="message_id" type="integer">
+  The database ID of the saved bot `Message` record. Use this ID to submit a rating via `POST /api/ratings/`.
+</ResponseField>
+
+<ResponseField name="response" type="string">
+  The assistant's answer in markdown format, grounded in the retrieved document chunks.
+</ResponseField>
+
+<ResponseField name="conversation_id" type="string">
+  URL-safe slug of the conversation (11 characters, randomly generated). Always prefer this over the numeric ID for subsequent requests.
+</ResponseField>
+
+<ResponseField name="sources" type="array">
+  List of source document citations used to generate the answer.
+
+  <Expandable title="Source object fields">
+    <ResponseField name="title" type="string">
+      Human-readable title of the source document.
+    </ResponseField>
+    <ResponseField name="filename" type="string">
+      The document's slug/filename as stored in the system. Pass this to `GET /api/documents/<filename>/` to retrieve the file.
+    </ResponseField>
+    <ResponseField name="page_number" type="integer">
+      Page number within the document where the cited content was found.
+    </ResponseField>
+    <ResponseField name="score" type="float">
+      Semantic similarity score for this chunk (higher is more relevant).
+    </ResponseField>
+    <ResponseField name="document_id" type="string">
+      Internal document identifier in the vector store.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="top_k_used" type="integer">
+  The number of document chunks that were retrieved for this query. Reflects the adaptive top-k calculation.
+</ResponseField>
+
+<ResponseField name="latency" type="float">
+  Total end-to-end response time in seconds, from request receipt to response serialization.
+</ResponseField>
+
+### Example
+
+<Tabs>
+  <Tab title="cURL">
+    ```bash
+    curl -X POST https://your-domain.com/api/chat/ \
+      -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
+      -H "Content-Type: application/json" \
+      -d '{
+        "content": "¿Cuáles son los requisitos para solicitar una licencia de construcción?",
+        "conversation_id": "aB3dEfGhIjK"
+      }'
+    ```
+  </Tab>
+  <Tab title="Response">
+    ```json
+    {
+      "message_id": 482,
+      "response": "Para solicitar una licencia de construcción debe presentar los siguientes documentos:\n\n1. **Formulario de solicitud** debidamente completado...",
+      "conversation_id": "aB3dEfGhIjK",
+      "sources": [
+        {
+          "title": "Reglamento de Construcciones Municipales",
+          "filename": "reglamento_construccion_2024.pdf",
+          "page_number": 14,
+          "score": 0.91,
+          "document_id": "doc_8f2a1b"
+        },
+        {
+          "title": "Guía de Trámites Municipales",
+          "filename": "guia_tramites.pdf",
+          "page_number": 3,
+          "score": 0.87,
+          "document_id": "doc_3c9e2d"
+        }
+      ],
+      "top_k_used": 7,
+      "latency": 2.34
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /api/documents/\<filename\>/
+
+Serves the raw binary file for a document stored in the system — used by the frontend PDF viewer to display the source cited in a chat response. The `filename` path parameter is the document's **slug** (as returned in the `sources[].filename` field), not the original upload filename.
+
+**Authentication:** This endpoint accepts the JWT token either via the standard `Authorization: Bearer <token>` header **or** via a `?token=<token>` query parameter. The query-parameter method is required for browser `<iframe>` PDF embeds, which cannot send custom headers.
+
+<ParamField query="token" type="string">
+  JWT access token as a query parameter. Only needed when the `Authorization` header cannot be set (e.g., inside an `<iframe src="...">`).
+</ParamField>
+
+### Example
+
+<Tabs>
+  <Tab title="Header auth (cURL)">
+    ```bash
+    curl -X GET \
+      "https://your-domain.com/api/documents/reglamento_construccion_2024.pdf" \
+      -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
+      --output reglamento.pdf
+    ```
+  </Tab>
+  <Tab title="Query param (iframe)">
+    ```html
+    <iframe
+      src="https://your-domain.com/api/documents/reglamento_construccion_2024.pdf?token=eyJhbGci...#page=14"
+      width="100%"
+      height="600px"
+    />
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  The response `Content-Disposition` header is set to `inline`, allowing browsers to render PDFs natively rather than downloading them. The `#page=N` URL fragment works in most PDF viewers to jump directly to the cited page.
+</Note>
+
+The backend resolves the file from three locations in order: the `UploadedDocument` database record (which may point to a PostgreSQL binary store or a filesystem path), a direct PostgreSQL file store lookup, and finally a legacy filesystem directory fallback.

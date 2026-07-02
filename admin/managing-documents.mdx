@@ -1,0 +1,196 @@
+---
+title: "Managing Documents and Embeddings in NISIRA"
+sidebarTitle: "Documents"
+description: "Upload, process, and re-embed documents from the Admin Panel or Google Drive. Monitor chunk counts, embedding status, and delete stale document vectors."
+---
+
+NISIRA's knowledge base is built from documents stored in Google Drive and indexed as vector embeddings in a PostgreSQL pgvector table. This page walks through every step of the document lifecycle — from uploading a file to verifying that its embeddings are ready for retrieval — and covers the CLI tools available for programmatic corpus management.
+
+## Uploading documents
+
+You can add documents to the corpus in two ways:
+
+**Option A — Upload through the Admin Panel**
+
+Navigate to **Admin Panel → Google Drive tab** and use the upload card on the right side of the screen. The component accepts `.pdf`, `.txt`, `.md`, `.doc`, and `.docx` files up to 50 MB via drag-and-drop or a file-picker dialog. When you click **Subir documento**, the panel posts the file to the backend:
+
+```
+POST /api/admin/drive/upload/
+Content-Type: multipart/form-data
+Authorization: Bearer <admin_token>
+
+file=<binary>
+```
+
+The backend saves the file to Google Drive (if authenticated) and also writes it to local storage at `data/documents/<file_name>`. Embedding generation for that single file starts immediately in a background daemon thread, so the upload response returns at once with `"processing": "background"`.
+
+**Option B — Google Drive folder sync**
+
+Files placed directly in the configured Drive folder are pulled in automatically when you trigger a sync. Navigate to the **Google Drive tab** and click **Sincronizar** (or call the sync endpoint directly). The system detects only new files — duplicates are identified by MD5 hash and skipped.
+
+```
+POST /api/admin/drive/sync/
+Authorization: Bearer <admin_token>
+```
+
+<Note>
+  When a sync downloads one or more new files it automatically launches background embedding generation for those files. You do not need to trigger generation manually after a sync completes.
+</Note>
+
+## End-to-end upload and embed workflow
+
+<Steps>
+  <Step title="Sync or upload your documents">
+    Either trigger a Drive sync from the **Google Drive tab** or upload files directly. Wait until the progress bar shows `completed` and the log stream shows `[OK] Sincronización completa`.
+  </Step>
+  <Step title="Open the Embeddings tab">
+    Switch to **Admin Panel → Embeddings tab**. Review the stat cards to confirm that the total chunk count and table size reflect the documents you just added.
+  </Step>
+  <Step title="Generate embeddings (if needed)">
+    If your upload went through the sync path and new files were detected, generation has already started. If you uploaded files manually and the background thread did not cover all files, click **Generar** to process all remaining unprocessed documents:
+
+    ```
+    POST /api/admin/embeddings/generate/
+    Authorization: Bearer <admin_token>
+    ```
+
+    The endpoint returns immediately. Poll for progress:
+
+    ```
+    GET /api/admin/embeddings/progress/
+    Authorization: Bearer <admin_token>
+    ```
+
+    The response includes `status` (`starting` → `running` → `completed` or `error`), `current`, `total`, `current_file`, `processed`, `errors`, and a rolling `logs` array. The panel polls this endpoint every 1.5 seconds and renders the results in a live progress bar and log stream.
+  </Step>
+  <Step title="Verify embeddings">
+    Once generation finishes, run a verification pass to confirm index integrity:
+
+    ```
+    POST /api/admin/embeddings/verify/
+    Authorization: Bearer <admin_token>
+    ```
+
+    A successful response includes `collections_verified` and per-collection status. The panel displays a success notification with the count of verified collections.
+  </Step>
+  <Step title="Confirm indexed documents">
+    Click **Ver documentos indexados** in the Embeddings tab to open the processed-files list. Each row shows the filename, file type icon, and chunk count. Files marked **Sin archivo en Drive** exist in the vector index but have been removed from Drive; you can delete their embeddings individually (see below).
+  </Step>
+</Steps>
+
+## Checking embedding status
+
+**Overall status**
+
+Retrieve aggregate statistics for the entire vector store:
+
+```
+GET /api/admin/embeddings/status/
+Authorization: Bearer <admin_token>
+```
+
+Response fields: `success`, `backend` (`postgres` or `chroma`), `total_collections`, `total_documents`, `collections` (list with `name` and `document_count`), and for PostgreSQL backends a `storage_info` object with detailed table stats including `table_size`.
+
+**Per-file status**
+
+List every file that has embeddings along with its chunk count:
+
+```
+GET /api/admin/embeddings/processed/
+Authorization: Bearer <admin_token>
+```
+
+Each entry in the `files` array contains `file_name`, `file_type`, and `chunks_count`.
+
+## Verifying embeddings
+
+The verify endpoint checks the integrity of every collection in the vector store and returns a list of results:
+
+```
+POST /api/admin/embeddings/verify/
+Authorization: Bearer <admin_token>
+```
+
+```json
+{
+  "success": true,
+  "backend": "postgres",
+  "collections_verified": 1,
+  "results": [
+    {
+      "collection": "rag_embeddings",
+      "document_count": 15799,
+      "status": "OK",
+      "backend": "postgres"
+    }
+  ]
+}
+```
+
+## Clearing all embeddings
+
+<Warning>
+  Clearing embeddings deletes all vector data from the store. The assistant will be unable to retrieve any documents until embeddings are fully regenerated. Only use this if you need to rebuild the index from scratch.
+</Warning>
+
+```
+POST /api/admin/embeddings/clear/
+Authorization: Bearer <admin_token>
+```
+
+For a PostgreSQL backend the response includes `embeddings_deleted` (the count of rows removed). For ChromaDB backends the response lists `deleted` collection names.
+
+## Deleting a single document's embeddings
+
+To remove only the vectors for one file — for example, to force a re-embed after the source document changes — use the per-document delete endpoint:
+
+```
+DELETE /api/admin/embeddings/delete/<file_name>/
+Authorization: Bearer <admin_token>
+```
+
+URL-encode the `file_name` if it contains spaces or special characters. The response includes `deleted_embeddings` (chunk count removed) and confirms the operation. In the Admin Panel you can trigger this from the trash icon next to any row in the indexed-documents list.
+
+## UploadedDocument tracking
+
+Every file uploaded through the Admin Panel API is tracked in the `UploadedDocument` Django model with the following fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `file_name` | `CharField` | Original filename |
+| `file_path` | `CharField` | Local path at `data/documents/<name>` |
+| `file_size` | `BigIntegerField` | Size in bytes |
+| `file_type` | `CharField` | File extension (e.g. `.pdf`) |
+| `drive_file_id` | `CharField` | Google Drive file ID (null if not uploaded to Drive) |
+| `drive_uploaded` | `BooleanField` | Whether the file was successfully uploaded to Drive |
+| `processed` | `BooleanField` | Whether embedding generation has run |
+| `chunks_created` | `IntegerField` | Number of text chunks extracted |
+| `embeddings_generated` | `IntegerField` | Number of embedding vectors stored |
+| `uploaded_at` | `DateTimeField` | Upload timestamp |
+| `processed_at` | `DateTimeField` | Embedding completion timestamp (null if not yet processed) |
+
+You can inspect these records directly at `/django-admin/api/uploadeddocument/`.
+
+## CLI alternatives
+
+For scripted workflows or initial corpus loading, two management commands are available:
+
+**Programmatic RAG control**
+
+```bash
+python manage.py rag_manage
+```
+
+Provides sub-commands for corpus inspection and embedding operations without going through the HTTP layer.
+
+**Full one-shot Drive sync**
+
+```bash
+python manage.py sync_drive_full
+```
+
+Pulls all files from the configured Google Drive folder and triggers embedding generation in a single blocking operation. Useful for initial setup or scheduled nightly jobs.
+
+<Tip>
+  The pipeline uses chunk size 500 tokens with 50-token overlap, and retrieval blends 60% semantic (vector cosine similarity, minimum threshold 0.65) with 40% lexical (BM25) search. These parameters are visible in the **Embeddings tab → Pipeline parameters** info card.
+</Tip>

@@ -1,0 +1,293 @@
+---
+title: "Conversations API: Manage Chat Thread History"
+sidebarTitle: "Conversations"
+description: "Create, list, and delete conversation threads. Retrieve paginated message history per conversation using the slug-based or legacy numeric ID."
+---
+
+Conversations are the persistent thread containers for all user–assistant exchanges in NISIRA Assistant. Each conversation is identified by a randomly generated 11-character URL-safe slug that hides the internal numeric primary key. All four endpoints require a valid JWT Bearer token and scope every operation to the authenticated user — users cannot access or modify conversations that belong to other accounts.
+
+## GET /api/conversations/
+
+Returns a paginated list of conversations belonging to the authenticated user, ordered by most-recently-updated first.
+
+### Query Parameters
+
+<ParamField query="page" type="integer" default="1">
+  Page number, 1-indexed.
+</ParamField>
+
+<ParamField query="size" type="integer" default="15">
+  Number of conversations per page. Clamped to the range [1, 100].
+</ParamField>
+
+### Response
+
+<ResponseField name="conversations" type="array">
+  Array of conversation summary objects.
+
+  <Expandable title="Conversation object fields">
+    <ResponseField name="id" type="string">
+      The conversation slug (same as `slug`). Use this as `conversation_id` in all other endpoints.
+    </ResponseField>
+    <ResponseField name="numeric_id" type="integer">
+      Legacy numeric primary key. Prefer `id` (slug) for new integrations.
+    </ResponseField>
+    <ResponseField name="slug" type="string">
+      URL-safe 11-character random slug.
+    </ResponseField>
+    <ResponseField name="title" type="string">
+      Conversation title, typically the first user message (up to 50 characters).
+    </ResponseField>
+    <ResponseField name="created_at" type="string">
+      ISO 8601 timestamp of when the conversation was created.
+    </ResponseField>
+    <ResponseField name="updated_at" type="string">
+      ISO 8601 timestamp of the last message or update.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="page" type="integer">
+  Current page number.
+</ResponseField>
+
+<ResponseField name="size" type="integer">
+  Page size used for this response.
+</ResponseField>
+
+<ResponseField name="total" type="integer">
+  Total number of conversations owned by the user.
+</ResponseField>
+
+<ResponseField name="has_more" type="boolean">
+  `true` if there are additional pages beyond the current one.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X GET "https://your-domain.com/api/conversations/?page=1&size=10" \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+```json
+{
+  "conversations": [
+    {
+      "id": "aB3dEfGhIjK",
+      "numeric_id": 47,
+      "slug": "aB3dEfGhIjK",
+      "title": "¿Cuáles son los requisitos para solicitar una licencia?",
+      "created_at": "2024-11-10T14:22:01.483Z",
+      "updated_at": "2024-11-10T14:25:37.901Z"
+    }
+  ],
+  "page": 1,
+  "size": 10,
+  "total": 1,
+  "has_more": false
+}
+```
+
+---
+
+## POST /api/conversations/create/
+
+Creates a new, empty conversation for the authenticated user.
+
+### Request Body
+
+<ParamField body="title" type="string">
+  Optional display title for the conversation. If omitted, the backend generates a default title based on the current date and time (e.g., `"Conversación 10/11/2024 14:22"`).
+</ParamField>
+
+### Response
+
+<ResponseField name="id" type="string">
+  The new conversation's slug. Use this as `conversation_id` when sending the first message.
+</ResponseField>
+
+<ResponseField name="numeric_id" type="integer">
+  Legacy numeric primary key.
+</ResponseField>
+
+<ResponseField name="slug" type="string">
+  URL-safe 11-character random slug (same as `id`).
+</ResponseField>
+
+<ResponseField name="title" type="string">
+  The conversation title that was saved.
+</ResponseField>
+
+<ResponseField name="created_at" type="string">
+  ISO 8601 creation timestamp.
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Confirmation message: `"Conversación creada exitosamente"`.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X POST https://your-domain.com/api/conversations/create/ \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Consulta sobre normativas urbanas"}'
+```
+
+```json
+{
+  "id": "mN7pQrStUvW",
+  "numeric_id": 48,
+  "slug": "mN7pQrStUvW",
+  "title": "Consulta sobre normativas urbanas",
+  "created_at": "2024-11-10T15:00:00.000Z",
+  "message": "Conversación creada exitosamente"
+}
+```
+
+---
+
+## GET /api/conversations/\<conversation_id\>/messages/
+
+Returns paginated messages for a specific conversation. Page 1 returns the 15 most recent messages in ascending chronological order (oldest first within the page). Page 2 returns the 15 messages before those, also in ascending order — this design supports infinite-scroll history loading from the bottom of the chat window.
+
+<Note>
+  The `conversation_id` path parameter accepts either the **slug** (preferred, e.g., `aB3dEfGhIjK`) or the legacy **numeric ID** (e.g., `47`). The backend detects which format is being used automatically.
+</Note>
+
+### Query Parameters
+
+<ParamField query="page" type="integer" default="1">
+  Page number. Page 1 is the most recent batch of messages.
+</ParamField>
+
+<ParamField query="size" type="integer" default="15">
+  Number of messages per page. Clamped to the range [1, 100].
+</ParamField>
+
+### Response
+
+<ResponseField name="conversation_id" type="string">
+  The conversation slug.
+</ResponseField>
+
+<ResponseField name="conversation_title" type="string">
+  The conversation's display title.
+</ResponseField>
+
+<ResponseField name="messages" type="array">
+  Ordered array of message objects (ascending by creation time within the page).
+
+  <Expandable title="Message object fields">
+    <ResponseField name="id" type="integer">
+      The message's database ID. Use this with `POST /api/ratings/` to submit feedback.
+    </ResponseField>
+    <ResponseField name="content" type="string">
+      The message text. Bot messages are markdown-formatted.
+    </ResponseField>
+    <ResponseField name="is_user" type="boolean">
+      `true` for user messages, `false` for bot responses.
+    </ResponseField>
+    <ResponseField name="timestamp" type="string">
+      ISO 8601 creation timestamp.
+    </ResponseField>
+    <ResponseField name="sources" type="array">
+      For bot messages: parsed array of source citation objects (same structure as `POST /api/chat/` sources). Empty array for user messages and bot messages with no citations.
+    </ResponseField>
+    <ResponseField name="rating" type="string | null">
+      The current user's rating for this message: `"like"`, `"dislike"`, or `null` if unrated.
+    </ResponseField>
+    <ResponseField name="rating_issue_tag" type="string | null">
+      The issue tag associated with the current user's rating, or `null`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="total" type="integer">
+  Total number of messages in the conversation.
+</ResponseField>
+
+<ResponseField name="has_more" type="boolean">
+  `true` if older pages of messages exist beyond the current page.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X GET \
+  "https://your-domain.com/api/conversations/aB3dEfGhIjK/messages/?page=1&size=15" \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+```json
+{
+  "conversation_id": "aB3dEfGhIjK",
+  "numeric_id": 47,
+  "slug": "aB3dEfGhIjK",
+  "conversation_title": "¿Cuáles son los requisitos para solicitar una licencia?",
+  "messages": [
+    {
+      "id": 481,
+      "content": "¿Cuáles son los requisitos para solicitar una licencia de construcción?",
+      "is_user": true,
+      "timestamp": "2024-11-10T14:22:05.123Z",
+      "sources": [],
+      "rating": null,
+      "rating_issue_tag": null
+    },
+    {
+      "id": 482,
+      "content": "Para solicitar una licencia de construcción debe presentar...",
+      "is_user": false,
+      "timestamp": "2024-11-10T14:22:07.451Z",
+      "sources": [
+        {
+          "title": "Reglamento de Construcciones Municipales",
+          "filename": "reglamento_construccion_2024.pdf",
+          "page_number": 14,
+          "score": 0.91,
+          "document_id": "doc_8f2a1b"
+        }
+      ],
+      "rating": "like",
+      "rating_issue_tag": "none"
+    }
+  ],
+  "page": 1,
+  "size": 15,
+  "total": 2,
+  "has_more": false
+}
+```
+
+---
+
+## DELETE /api/conversations/\<conversation_id\>/delete/
+
+Permanently deletes a conversation and all of its messages. This operation is irreversible — all `Message` records are deleted via CASCADE, and any associated `Rating` records are also removed.
+
+<Warning>
+  Deletion is permanent. All messages and ratings associated with this conversation will be lost. There is no soft-delete or trash mechanism.
+</Warning>
+
+### Response
+
+<ResponseField name="message" type="string">
+  Confirmation string: `"Conversación eliminada exitosamente"`.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X DELETE \
+  "https://your-domain.com/api/conversations/aB3dEfGhIjK/delete/" \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+```json
+{
+  "message": "Conversación eliminada exitosamente"
+}
+```

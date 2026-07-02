@@ -1,0 +1,99 @@
+---
+title: "How the Hybrid RAG Pipeline Works in NISIRA"
+sidebarTitle: "RAG Pipeline"
+description: "NISIRA's RAG pipeline combines 60% semantic vector search with 40% lexical keyword search, query reformulation, topic filtering, and diversified result ranking."
+---
+
+The `RAGPipeline` class in `rag_system/rag_engine/pipeline.py` is the central orchestrator of NISIRA Assistant's retrieve-and-generate flow. Every user question travels through a series of coordinated steps — from conversational reformulation and hybrid document retrieval, through topic filtering and result diversification, to LLM-based answer generation with streaming latency tracking. The sections below trace that journey end-to-end.
+
+## End-to-End Pipeline Flow
+
+<Steps>
+  <Step title="Trivial query check">
+    Before any retrieval, `_is_trivial_query()` inspects the question for greetings, acknowledgements, or very short inputs (fewer than 3 words). Matching queries are answered directly by the LLM in conversational mode via `_handle_trivial_query()` — no vector store access is needed.
+  </Step>
+  <Step title="Document-list query check">
+    If the question matches a list of patterns such as *"qué documentos tienes"* or *"documentos disponibles"*, `_is_document_list_query()` routes it to `_handle_document_list_query()`, which reads the vector store index and returns a structured inventory without running retrieval.
+  </Step>
+  <Step title="Query reformulation (conversational memory)">
+    When a conversation `history` is supplied, `_needs_reformulation()` checks whether the new question is referential (e.g. *"¿Y cómo se instala?"*) — too short, contains demonstratives, or starts with a linking conjunction. If so, `_reformulate_with_history()` uses the LLM to merge the last user turn with the current question into a single, self-contained search string. A simple fallback concatenation is used if the LLM is unavailable.
+  </Step>
+  <Step title="Citation detection and query enhancement">
+    `_enhance_citation_query()` scans the reformulated question for author–year patterns (`Arias(2020)`, `García et al. (2019)`). Detected citations trigger `is_citation_query = True`, which automatically reduces `top_k` to 3 and appends contextual keywords to the search string to improve recall for bibliographic chunks.
+  </Step>
+  <Step title="Embedding generation">
+    The (possibly enhanced) search query is embedded by `EmbeddingManager.create_embedding()`. The active provider is **Google `text-embedding-004`** (production) or **`sentence-transformers/all-mpnet-base-v2`** (local fallback), producing a **768-dimensional** vector. Embedding latency is captured for metrics.
+  </Step>
+  <Step title="Hybrid search">
+    `_hybrid_search()` fans out across four search strategies simultaneously (see the table below) and merges results into a single ranked list using weighted scores. Duplicate chunks are deduplicated by `doc_id`.
+  </Step>
+  <Step title="Topic relevance filtering">
+    `_filter_by_topic_relevance()` extracts identifiers from the query — ISO standard numbers, law numbers, decree numbers, NTP codes, COBIT/ITIL/NIST references — and removes retrieved chunks whose source documents carry different identifiers, preventing unrelated standards from mixing in the context window.
+  </Step>
+  <Step title="Result diversification and slot allocation">
+    `_diversify_results()` enforces `max_per_source=3` (maximum chunks from a single document) and a Jaccard-based `diversity_threshold=0.4` to avoid near-duplicate chunks. A minimum-score filter (`min_score_threshold=0.05`) then drops low-confidence candidates. Finally, any document with `metadata_boost ≥ 0.6` (strong filename match) is guaranteed a slot in the top results.
+  </Step>
+  <Step title="Context building">
+    The final chunk list is concatenated into a context string capped at **`max_context_length = 12 000` characters**. Source metadata — `file_name`, `chunk_id`, `similarity_score`, and `page` (for PDFs) — is assembled into the `sources` array returned to the caller.
+  </Step>
+  <Step title="LLM answer generation">
+    `_create_rag_prompt()` constructs a system prompt that embeds the context, the current question, and (optionally) the last six conversation turns. The LLM is invoked with `temperature=0.4` and `max_response_tokens=1500`. When `collect_metrics=True`, the pipeline streams the response via `llm.stream()` to capture **Time to First Token (TTFT)**.
+  </Step>
+  <Step title="Response assembly">
+    The pipeline returns a dict containing `answer` (generated text), `sources` (list of chunk metadata with page-level deep links), `relevant_documents`, and an optional `metrics` payload with per-phase latency breakdowns.
+  </Step>
+</Steps>
+
+## Hybrid Search Weights
+
+The four search strategies are combined using the following weights, drawn directly from `RAG_CONFIG["retrieval"]`:
+
+| Strategy | Weight | Mechanism | Backend |
+|---|---|---|---|
+| Semantic | **0.6** | Cosine similarity on 768-D embeddings | pgvector (`search_similar`) or ChromaDB |
+| Lexical | **0.4** | Keyword frequency matching (`search_lexical`) with position-boost | PostgreSQL full-text or ChromaDB fallback |
+| Metadata | Variable | Filename–query word overlap; up to +0.8 per matching word | pgvector `search_by_metadata` or ChromaDB |
+| Expansion | 0.3 | Query term broadening using a curated synonym dictionary | ChromaDB or pgvector `get_all_documents` |
+
+<Note>
+Metadata and expansion searches are additive: metadata results slot in alongside semantic and lexical hits, while expansion is activated only when the merged result set is smaller than `top_k`.
+</Note>
+
+## Retrieval Configuration Reference
+
+| Parameter | Value | Purpose |
+|---|---|---|
+| `top_k` (pool) | 15 | Maximum candidates fetched before filtering |
+| `similarity_threshold` | 0.005 | Minimum cosine score to admit a chunk |
+| `semantic_weight` | 0.6 | Weight applied to semantic scores |
+| `lexical_weight` | 0.4 | Weight applied to lexical scores |
+| `diversity_threshold` | 0.4 | Jaccard threshold for near-duplicate filtering |
+| `max_per_source` | 3 | Maximum chunks retained from a single document |
+| `min_score_threshold` | 0.05 | Minimum weighted score to survive final filter |
+| `max_context_length` | 12 000 | Maximum characters sent to the LLM |
+| `citation_boost` | `true` | Extra weight for chunks containing bibliographic references |
+
+## LLM Providers
+
+The pipeline supports three generation backends, selected via the `LLM_PROVIDER` environment variable:
+
+| Provider | Model (default) | Env Var |
+|---|---|---|
+| `google` | `gemini-2.0-flash-exp` | `GOOGLE_API_KEY` |
+| `openrouter` | `google/gemma-2-9b-it` | `OPENROUTER_API_KEY` |
+| `groq` | `llama-3.3-70b-versatile` | `GROQ_API_KEY` |
+
+<Tip>
+Set `LLM_PROVIDER=groq` for the lowest Time to First Token in development. Use `LLM_PROVIDER=google` in production for the highest answer quality.
+</Tip>
+
+## Conversational Memory
+
+NISIRA passes up to the **last six messages** from the current conversation into every RAG query. The pipeline uses this history in two ways:
+
+1. **Query reformulation** — referential questions are rewritten into standalone search strings before embedding.
+2. **Answer generation** — `_create_rag_prompt()` prepends a formatted history block so the LLM can produce coherent multi-turn answers without repeating information already explained.
+
+<Warning>
+Conversational history is stored in-memory per request and not persisted in the vector store. It is sourced from the `Message` model via the `conversation.messages` relation.
+</Warning>

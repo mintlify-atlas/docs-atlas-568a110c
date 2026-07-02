@@ -1,47 +1,201 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with NISIRA Assistant"
+sidebarTitle: "Quickstart"
+description: "Run NISIRA Assistant locally in under 10 minutes using Docker Compose with MySQL, then make your first chat query against the RAG pipeline."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+This guide walks you through cloning the repository, configuring the required environment variables, and bringing up the full NISIRA Assistant stack — MySQL database, Django backend, and React frontend — with a single Docker Compose command. By the end you will have initialized the RAG pipeline and received a cited answer from your document corpus.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+<Note>
+  This guide covers local development using the default `docker-compose.yml` (MySQL + ChromaDB). For production deployment with PostgreSQL, pgvector, and Nginx, see the [Docker production deployment guide](/deployment/docker).
+</Note>
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
 
+  <Step title="Check prerequisites">
+    Before you begin, make sure the following tools are installed and available on your `PATH`:
+
+    - **Docker** ≥ 24 and **Docker Compose** v2 (`docker compose version`)
+    - **Git**
+    - An LLM API key — either a **Google AI API key** for Gemini 2.0 Flash, or an **OpenRouter API key** for any OpenRouter-hosted model
+
+    You do not need Python or Node.js installed locally; everything runs inside the containers.
+  </Step>
+
+  <Step title="Clone the repository">
     ```bash
-    npm install your-package
+    git clone https://github.com/HugoX2003/nisira-assistant.git
+    cd nisira-assistant
     ```
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+
+  <Step title="Configure the backend environment">
+    Copy the example environment file and open it for editing:
 
     ```bash
-    your-cli init
+    cp backend/.env.local.example backend/.env
     ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+
+    Set at minimum the following variables in `backend/.env`:
 
     ```bash
-    your-cli start
+    # Django core
+    SECRET_KEY=your-long-random-secret-key-here
+    DEBUG=True
+    ALLOWED_HOSTS=localhost,127.0.0.1
+
+    # Database (matches docker-compose.yml defaults)
+    DB_NAME=rag_asistente
+    DB_USER=root
+    DB_PASSWORD=sistemas
+    DB_HOST=db
+    DB_PORT=3306
+
+    # LLM provider — choose one
+    LLM_PROVIDER=google           # or: openrouter, groq
+    GOOGLE_API_KEY=your-gemini-api-key-here
+
+    # Optional: OpenRouter instead of Gemini
+    # LLM_PROVIDER=openrouter
+    # OPENROUTER_API_KEY=your-openrouter-api-key-here
+
+    # CORS
+    CORS_ALLOWED_ORIGINS=http://localhost:3000
+    ```
+
+    <Tip>
+      Generate a secure `SECRET_KEY` with: `python -c "import secrets; print(secrets.token_urlsafe(50))"`
+    </Tip>
+
+    <Warning>
+      Never commit `backend/.env` to version control. The repository's `.gitignore` already excludes it.
+    </Warning>
+  </Step>
+
+  <Step title="Start the stack with Docker Compose">
+    From the repository root, run:
+
+    ```bash
+    docker compose up
+    ```
+
+    Docker Compose will build and start three services:
+
+    | Service    | Port | Description                        |
+    |------------|------|------------------------------------|
+    | `db`       | 3306 | MySQL 8.0 database                 |
+    | `backend`  | 8000 | Django REST API + RAG pipeline     |
+    | `frontend` | 3000 | React SPA (served via Nginx)       |
+
+    Wait until you see log output from the backend indicating that migrations have run and the development server is listening:
+
+    ```
+    backend  | Starting development server at http://0.0.0.0:8000/
+    ```
+
+    <Info>
+      The first build downloads the `sentence-transformers/all-mpnet-base-v2` model (~420 MB) and installs Python dependencies. Subsequent starts are much faster.
+    </Info>
+  </Step>
+
+  <Step title="Create an admin user">
+    With the stack running, open a second terminal and execute the custom management command inside the backend container:
+
+    ```bash
+    docker compose exec backend python manage.py create_admin_user
+    ```
+
+    The command creates a superuser with username `admin` and prints the generated password to stdout. Save it — you will need it in the next step.
+
+    <Tip>
+      You can also use the standard Django superuser command: `docker compose exec backend python manage.py createsuperuser`
+    </Tip>
+  </Step>
+
+  <Step title="Log in to the frontend">
+    Open [http://localhost:3000](http://localhost:3000) in your browser. You will be redirected to `/login`.
+
+    Enter the credentials for the `admin` user you just created. Admin users are automatically redirected to the Admin Panel at `/admin`; regular users land on the chat interface at `/chat`.
+  </Step>
+
+  <Step title="Initialize the RAG pipeline">
+    The vector store must be initialized before the system can answer questions. You can do this from the Admin Panel UI, or via the API with the JWT token obtained during login.
+
+    **Option A — Admin Panel UI:** In the Admin Panel, navigate to the Embeddings tab and click **Initialize / Generate Embeddings**.
+
+    **Option B — cURL:** First retrieve a token, then call the initialize endpoint:
+
+    ```bash
+    # 1. Obtain a JWT token
+    TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/token/ \
+      -H "Content-Type: application/json" \
+      -d '{"username": "admin", "password": "YOUR_ADMIN_PASSWORD"}' \
+      | python -c "import sys, json; print(json.load(sys.stdin)['access'])")
+
+    # 2. Initialize the RAG system
+    curl -X POST http://localhost:8000/api/rag/initialize/ \
+      -H "Authorization: Bearer $TOKEN"
+    ```
+
+    A successful response returns a JSON object with `"success": true` and statistics about documents processed and embeddings generated. You can check the current state at any time:
+
+    ```bash
+    curl http://localhost:8000/api/rag/status/ \
+      -H "Authorization: Bearer $TOKEN"
     ```
   </Step>
+
+  <Step title="Send your first chat message">
+    With the pipeline initialized, send a question through the chat endpoint:
+
+    ```bash
+    curl -X POST http://localhost:8000/api/chat/ \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{"content": "What is ISO 27001?", "conversation_id": null}'
+    ```
+
+    The `conversation_id: null` field tells the API to start a new conversation. Pass the returned `conversation_id` value in subsequent requests to maintain context across turns.
+  </Step>
+
+  <Step title="Review the response and sources">
+    The API returns a JSON payload containing the bot's answer and an array of source citations:
+
+    ```json
+    {
+      "message": {
+        "id": 2,
+        "sender": "bot",
+        "text": "ISO 27001 es la norma internacional que establece los requisitos para...",
+        "sources": [
+          {
+            "file_name": "ISO_27001_2022.pdf",
+            "page": 4,
+            "chunk_id": 12,
+            "preview": "ISO/IEC 27001 especifica los requisitos para establecer, implementar...",
+            "similarity_score": 0.87
+          }
+        ],
+        "created_at": "2024-01-15T10:30:00Z"
+      },
+      "conversation_id": "abc123def45"
+    }
+    ```
+
+    In the browser at [http://localhost:3000/chat](http://localhost:3000/chat), the response renders as formatted Markdown. Each source badge in the UI is clickable and opens the original PDF file in an inline viewer, scrolled to the referenced page.
+  </Step>
+
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## What's next?
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+You now have a fully functional local NISIRA Assistant instance. From here you can:
+
+- **Upload documents** — Use the Admin Panel to upload PDF, DOCX, PPTX, XLSX, or TXT files and generate their embeddings.
+- **Configure Google Drive sync** — Set `ENABLE_GOOGLE_DRIVE=true` and provide `GOOGLE_DRIVE_FOLDER_ID` and `GOOGLE_CREDENTIALS_JSON` to enable automatic document polling.
+- **Switch LLM providers** — Change `LLM_PROVIDER` to `openrouter` or `groq` and provide the corresponding API key to try different models.
+- **Review evaluation metrics** — The Admin Panel's Metrics tab shows per-query latency breakdowns, Precision@k, faithfulness scores, and aggregated rating data.
+
+<Note>
+  Ready to go to production? The [Docker production deployment guide](/deployment/docker) covers switching to PostgreSQL with pgvector, configuring Nginx as a reverse proxy, and setting up SSL with Certbot on DigitalOcean or a similar VPS.
+</Note>

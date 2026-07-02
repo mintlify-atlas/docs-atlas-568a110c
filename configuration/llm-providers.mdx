@@ -1,0 +1,161 @@
+---
+title: "Configure LLM Providers in NISIRA Assistant"
+sidebarTitle: "LLM Providers"
+description: "Set up Gemini 2.0 Flash, OpenRouter, or Groq as the generation backend. Switch providers with a single environment variable and configure model, tokens, and temperature."
+---
+
+NISIRA Assistant's RAG pipeline supports three LLM providers — Google Gemini, OpenRouter, and Groq — and lets you switch between them with a single environment variable. All provider configuration lives in `backend/rag_system/config.py` under the `RAG_CONFIG['generation']` dictionary, with every sensitive value read from environment variables at startup. The generation stage wraps retrieved context into a structured academic-assistant prompt before calling the configured provider.
+
+---
+
+## Provider Selection
+
+Set the `LLM_PROVIDER` environment variable to activate one of the three backends:
+
+| Value | Provider | Notes |
+|---|---|---|
+| `openrouter` | OpenRouter | **Default.** Aggregates hundreds of models behind a single API. |
+| `google` | Google Gemini | Direct Google AI API; free tier available. |
+| `groq` | Groq | Ultra-low-latency inference for supported open models. |
+
+```bash
+LLM_PROVIDER=openrouter   # or: google | groq
+```
+
+<Note>
+  Only the provider matching `LLM_PROVIDER` needs its API key set. The other
+  keys can be omitted without affecting startup, but the system will raise a
+  runtime error if a query is attempted while the active provider's key is
+  missing.
+</Note>
+
+---
+
+## System Prompt and Generation Parameters
+
+Regardless of which provider is active, every RAG query uses the same generation settings defined in `RAG_CONFIG['generation']`:
+
+| Parameter | Value | Description |
+|---|---|---|
+| `temperature` | `0.4` | Controls response creativity. 0.4 balances factual accuracy with natural language flow for an academic context. |
+| `max_response_tokens` | `1500` | Maximum tokens in a single RAG answer. Keeps responses concise while allowing thorough explanations. |
+| System prompt persona | Academic assistant | Responds in Spanish, uses a friendly-but-professional tone, cites sources inline, and declines to answer when no relevant context is found. |
+
+<Note>
+  The system prompt is an **academic assistant** persona. It instructs the model
+  to respond **always in Spanish**, develop ideas conversationally (like a
+  professor explaining to a student), include inline citations from retrieved
+  documents, and honestly state when it has no relevant information. The prompt
+  template receives `{context}` (retrieved chunks) and `{question}` (the user
+  query) as runtime variables.
+</Note>
+
+---
+
+## Provider Configuration
+
+<Tabs>
+  <Tab title="Google Gemini">
+    Google Gemini is accessed via the Google AI API. On the free tier, requests are
+    capped at **15 requests per minute**; plan accordingly for concurrent users.
+
+    **Required variables**
+
+    | Variable | Default | Description |
+    |---|---|---|
+    | `GOOGLE_API_KEY` | — | **Required.** Your Google AI Studio API key. |
+    | `LLM_MODEL_GEMINI` | `gemini-2.0-flash-exp` | Gemini model name. Also used by the Gemini embedding model. |
+    | `LLM_MAX_TOKENS` | `8192` | Maximum tokens the model may generate at the API level. RAG responses are further capped at 1500 by `max_response_tokens`. |
+
+    The model-level `temperature` for Gemini is set to `None` in
+    `API_CONFIG['gemini']`, which means it defers to the API default. The
+    effective generation temperature (`0.4`) is applied at the RAG prompt layer,
+    not the model config layer, to prevent accidental divergence.
+
+    ```bash
+    # backend/.env
+    LLM_PROVIDER=google
+    GOOGLE_API_KEY=your-google-ai-studio-key
+    LLM_MODEL_GEMINI=gemini-2.0-flash-exp
+    LLM_MAX_TOKENS=8192
+    ```
+
+    <Warning>
+      The free tier of the Google AI API enforces a **15 requests/minute** rate
+      limit. If you expect higher traffic, upgrade to a paid tier or add
+      request-queuing logic in your deployment.
+    </Warning>
+  </Tab>
+
+  <Tab title="OpenRouter">
+    OpenRouter is a model aggregator that exposes hundreds of models — including
+    open-source and proprietary ones — through a single OpenAI-compatible API.
+    It is the **default provider** and the recommended choice for most deployments
+    because it allows you to swap models without changing provider code.
+
+    **Required variables**
+
+    | Variable | Default | Description |
+    |---|---|---|
+    | `OPENROUTER_API_KEY` | — | **Required.** Your OpenRouter API key (format: `sk-or-v1-…`). |
+    | `LLM_MODEL_OPENROUTER` | `google/gemma-2-9b-it` | OpenRouter model slug. Browse all available models at [openrouter.ai/models](https://openrouter.ai/models). |
+    | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | API base URL. Override only if routing through a proxy. |
+
+    ```bash
+    # backend/.env
+    LLM_PROVIDER=openrouter
+    OPENROUTER_API_KEY=sk-or-v1-your-key-here
+    LLM_MODEL_OPENROUTER=google/gemma-2-9b-it
+    # OPENROUTER_BASE_URL=https://openrouter.ai/api/v1  # default, no need to set
+    ```
+
+    <Tip>
+      To try a more capable model without changing infrastructure, simply update
+      `LLM_MODEL_OPENROUTER` to any slug from the OpenRouter catalogue, for
+      example `anthropic/claude-3.5-sonnet` or `meta-llama/llama-3.1-70b-instruct`.
+    </Tip>
+  </Tab>
+
+  <Tab title="Groq">
+    Groq provides ultra-fast inference for select open-source models using
+    dedicated LPU hardware. It is an excellent choice when response latency is
+    critical, such as in live classroom or real-time tutoring scenarios.
+
+    **Required variables**
+
+    | Variable | Default | Description |
+    |---|---|---|
+    | `GROQ_API_KEY` | — | **Required.** Your Groq API key. |
+    | `LLM_MODEL_GROQ` | `llama-3.3-70b-versatile` | Groq model identifier. Check [console.groq.com/docs/models](https://console.groq.com/docs/models) for the current model list. |
+    | `GROQ_BASE_URL` | `https://api.groq.com/openai/v1` | Groq API base URL. Override only if routing through a proxy. |
+
+    ```bash
+    # backend/.env
+    LLM_PROVIDER=groq
+    GROQ_API_KEY=gsk_your-groq-key-here
+    LLM_MODEL_GROQ=llama-3.3-70b-versatile
+    # GROQ_BASE_URL=https://api.groq.com/openai/v1  # default, no need to set
+    ```
+
+    <Info>
+      Groq's free tier has per-minute and daily token limits that vary by model.
+      `llama-3.3-70b-versatile` is a strong default; for higher throughput on
+      the free tier, consider `llama-3.1-8b-instant`.
+    </Info>
+  </Tab>
+</Tabs>
+
+---
+
+## Switching Providers at Runtime
+
+Because all provider config is driven by environment variables, switching providers requires only a change to `.env` (and a server restart in development, or a re-deploy in production):
+
+```bash
+# Switch from OpenRouter to Groq
+LLM_PROVIDER=groq
+GROQ_API_KEY=gsk_your-groq-key
+LLM_MODEL_GROQ=llama-3.3-70b-versatile
+```
+
+No code changes are needed. The `RAG_CONFIG['generation']['provider']` key is read once at import time from `os.getenv("LLM_PROVIDER", "openrouter")`.

@@ -1,0 +1,182 @@
+---
+title: "RAG Pipeline Configuration Reference"
+sidebarTitle: "RAG Settings"
+description: "Tune retrieval behavior, chunking strategy, embedding model, and vector store backend. All settings live in rag_system/config.py and are controllable via environment variables."
+---
+
+NISIRA Assistant's retrieval-augmented generation pipeline is configured through a single source of truth: `backend/rag_system/config.py`. This file defines four top-level configuration dictionaries — `RAG_CONFIG`, `DOCUMENT_PROCESSING_CONFIG`, `API_CONFIG`, and `CHROMA_CONFIG` — along with `VECTOR_STORE_CONFIG` for the storage backend. Most sensitive or deployment-specific values are read from environment variables; the rest are tuned constants you can edit directly in `config.py`. This page documents every setting and explains how each one affects retrieval quality, indexing behavior, and generation output.
+
+---
+
+## Retrieval Settings
+
+All retrieval tuning lives under `RAG_CONFIG['retrieval']`. These values control how many document chunks are fetched per query, how they are scored, and how the final context window is assembled.
+
+| Setting | Value | Description |
+|---|---|---|
+| `top_k` | `15` | Maximum number of candidate chunks retrieved from the vector store per query. The pipeline may return fewer chunks after diversity filtering and minimum-score enforcement. |
+| `similarity_threshold` | `0.005` | Minimum cosine similarity score for a chunk to pass the initial vector-search filter. Set intentionally low to maximise recall; the re-ranking and `min_score_threshold` steps handle precision downstream. |
+| `rerank` | `True` | When `True`, retrieved chunks are re-scored after the initial vector search using a combined semantic + lexical signal before being passed to the LLM. |
+| `max_context_length` | `12000` | Hard cap (in characters) on the total context injected into the LLM prompt. Prevents token-limit overflows on models with smaller context windows. |
+| `diversity_threshold` | `0.4` | Controls source diversity. Chunks from the same document that are too similar to an already-selected chunk are penalised, encouraging the context window to draw from multiple sources. |
+| `max_per_source` | `3` | Maximum number of chunks from any single source document included in a single response. Works in conjunction with `diversity_threshold` to avoid over-indexing on one file. |
+| `min_score_threshold` | `0.05` | Post-rerank minimum score for a chunk to be cited as a source in the final answer. Chunks below this threshold are dropped from the source list even if they appear in the context. |
+| `semantic_weight` | `0.6` | Weight given to vector (semantic) similarity in the hybrid scoring formula. |
+| `lexical_weight` | `0.4` | Weight given to keyword (lexical / BM25-style) similarity in the hybrid scoring formula. |
+
+<Info>
+  The **hybrid scoring** formula combines semantic and lexical signals:
+  `final_score = (semantic_weight × semantic_score) + (lexical_weight × lexical_score)`.
+  Adjusting the weights shifts the balance between conceptual relevance and
+  exact-keyword matching. The defaults (60 / 40) work well for academic documents
+  that mix prose explanations with technical terminology.
+</Info>
+
+---
+
+## Generation Settings
+
+Generation parameters live under `RAG_CONFIG['generation']` and apply to all three LLM providers.
+
+| Setting | Value | Description |
+|---|---|---|
+| `temperature` | `0.4` | Sampling temperature for the LLM. Lower values produce more deterministic, factual answers; higher values increase creativity. 0.4 is chosen to balance natural language flow with academic accuracy. |
+| `max_response_tokens` | `1500` | Token budget for each generated answer. Long enough for thorough explanations; short enough to keep responses focused and within rate-limit budgets. |
+| `provider` | env `LLM_PROVIDER` | Active LLM backend, resolved from the `LLM_PROVIDER` environment variable (default: `openrouter`). |
+
+The system prompt instructs the model to act as a **friendly academic assistant** that:
+- Responds **always in Spanish**, translating English source material naturally.
+- Develops ideas conversationally, explaining *why* and *what for*, not just *what*.
+- Includes inline citations: *Según el documento, "..." (source.pdf)*.
+- Refuses to answer when no relevant context is found in the retrieved chunks.
+- Structures answers with a brief introduction, developed main points, supporting citations, and a synthesis where applicable.
+
+---
+
+## Document Chunking
+
+Document chunking settings are defined in `DOCUMENT_PROCESSING_CONFIG['chunk_config']`. Each supported file format has its own chunk size, overlap, and minimum chunk size, tuned to that format's typical structure.
+
+<Tabs>
+  <Tab title="PDF">
+    PDFs often contain dense academic content with complex layouts. Shorter chunks
+    help isolate individual concepts.
+
+    | Parameter | Value | Description |
+    |---|---|---|
+    | `chunk_size` | `1300` | Target chunk length in characters. |
+    | `chunk_overlap` | `260` | Characters shared between adjacent chunks (20% of chunk size). Prevents context loss at chunk boundaries. |
+    | `min_chunk_size` | `180` | Chunks smaller than this are discarded to avoid noisy micro-fragments. |
+  </Tab>
+
+  <Tab title="TXT">
+    Plain-text files tend to be continuous prose. Slightly smaller chunks improve
+    retrieval granularity.
+
+    | Parameter | Value | Description |
+    |---|---|---|
+    | `chunk_size` | `1100` | Target chunk length in characters. |
+    | `chunk_overlap` | `220` | Characters shared between adjacent chunks (~20%). |
+    | `min_chunk_size` | `150` | Minimum viable chunk size. |
+  </Tab>
+
+  <Tab title="DOCX">
+    Word documents often mix headings, tables, and prose sections. The DOCX
+    profile mirrors PDF settings to handle this variety.
+
+    | Parameter | Value | Description |
+    |---|---|---|
+    | `chunk_size` | `1300` | Target chunk length in characters. |
+    | `chunk_overlap` | `260` | Characters shared between adjacent chunks. |
+    | `min_chunk_size` | `180` | Minimum viable chunk size. |
+  </Tab>
+
+  <Tab title="Default (.doc, .pptx, .xlsx)">
+    A conservative fallback profile used for `.doc`, `.pptx`, `.xlsx`, and any
+    other supported format without a dedicated profile.
+
+    | Parameter | Value | Description |
+    |---|---|---|
+    | `chunk_size` | `1000` | Target chunk length in characters. |
+    | `chunk_overlap` | `200` | Characters shared between adjacent chunks (20%). |
+    | `min_chunk_size` | `100` | Minimum viable chunk size. |
+  </Tab>
+</Tabs>
+
+**Supported file formats:** `.pdf`, `.txt`, `.docx`, `.doc`, `.pptx`, `.xlsx`
+
+Additional processing flags (all `True` by default):
+
+| Flag | Description |
+|---|---|
+| `extract_metadata` | Extract and store document metadata (title, author, creation date) alongside chunks. |
+| `preserve_structure` | Attempt to maintain heading hierarchy and section boundaries during chunking. |
+| `clean_text` | Strip artefacts (ligatures, excess whitespace, OCR noise) from extracted text before chunking. |
+
+---
+
+## Embedding Settings
+
+NISIRA Assistant uses a **two-tier embedding strategy**: Google's `text-embedding-004` as the primary production model and `all-mpnet-base-v2` (local HuggingFace) as the fallback.
+
+| Setting | Env Var | Default | Description |
+|---|---|---|---|
+| Primary model | `GEMINI_EMBEDDING_MODEL` | `models/text-embedding-004` | Google's production embedding model. Used when `GOOGLE_API_KEY` is set. High-quality 768-dimensional embeddings with no local GPU required. |
+| Fallback model | `EMBEDDING_MODEL` | `sentence-transformers/all-mpnet-base-v2` | Local HuggingFace model. Runs on CPU by default; produces 768-dimensional embeddings compatible with the same vector store schema. |
+| Inference device | `EMBEDDING_DEVICE` | `cpu` | Device for local embedding inference. Set to `cuda` if a GPU is available to speed up document indexing. |
+
+<Note>
+  Both the primary and fallback embedding models produce **768-dimensional
+  vectors**. This means you can switch between them without re-indexing your
+  document store or changing the vector store schema.
+</Note>
+
+Additional HuggingFace embedding options (configurable via env vars):
+
+| Variable | Default | Description |
+|---|---|---|
+| `EMBEDDING_MAX_SEQ_LENGTH` | `512` | Maximum token sequence length passed to the local embedding model. |
+| `EMBEDDING_NORMALIZE` | `true` | When `true`, embedding vectors are L2-normalised, which is required for cosine similarity to work correctly. |
+
+---
+
+## Vector Store
+
+The vector store backend is selected via the `VECTOR_STORE_BACKEND` environment variable. Both backends store the same 768-dimensional embedding vectors and are drop-in alternatives from the application's perspective.
+
+| Setting | Env Var | Default | Description |
+|---|---|---|---|
+| Backend | `VECTOR_STORE_BACKEND` | `postgres` | `postgres` uses pgvector on the existing PostgreSQL database. `chroma` runs a local ChromaDB instance. |
+| Database URL | `DATABASE_URL` | — | PostgreSQL connection URI used by both Django ORM and the pgvector store. Required when `VECTOR_STORE_BACKEND=postgres`. |
+
+### PostgreSQL / pgvector (Production)
+
+Using `postgres` stores vectors inside the same PostgreSQL database as the rest of the application data, eliminating a separate infrastructure dependency. Requires the `pgvector` extension to be enabled on the database.
+
+```bash
+VECTOR_STORE_BACKEND=postgres
+DATABASE_URL=postgresql://user:password@host:5432/dbname
+```
+
+### ChromaDB (Development)
+
+`chroma` runs an embedded ChromaDB instance that persists data to a local directory. No additional service or extension is required, making it ideal for local development and quick testing.
+
+| ChromaDB Setting | Value | Description |
+|---|---|---|
+| `persist_directory` | `chroma_db/` | Local directory where ChromaDB persists its data files (relative to `backend/`). |
+| `collection_name` | `rag_documents` | Name of the ChromaDB collection that holds all indexed document chunks. |
+| `distance_function` | `cosine` | Distance metric used for nearest-neighbour search. Must match the normalisation applied during embedding. |
+| `embedding_dimension` | `768` | Vector dimension; must match the output of the active embedding model. |
+
+```bash
+VECTOR_STORE_BACKEND=chroma
+# No DATABASE_URL needed for local ChromaDB
+```
+
+<Tip>
+  The development example file (`backend/.env.local.example`) sets
+  `VECTOR_STORE_BACKEND=chroma` by default. Switch to `postgres` before deploying
+  to production so that your vector data is co-located with the rest of your
+  application database and benefits from automated backups.
+</Tip>
