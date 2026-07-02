@@ -1,7 +1,7 @@
 ---
-title: "Sync Documents from Google Drive into NISIRA"
+title: "Automatically Sync Google Drive Documents into NISIRA RAG"
 sidebarTitle: "Drive Sync"
-description: "Automatically ingest files from a Google Drive folder into the RAG pipeline. Configure a service account or OAuth token, set a folder ID, and enable polling-based sync."
+description: "Ingest files from a Google Drive folder into the RAG pipeline. Configure OAuth or a service account, set a folder ID, and start the polling sync loop."
 ---
 
 NISIRA can continuously ingest documents from a designated Google Drive folder without manual uploads. The `GoogleDriveManager` class (in `rag_system/drive_sync/drive_manager.py`) handles authentication, file listing, modification-time-aware downloading, and persistent storage. Once configured, you can trigger syncs on demand through the Admin Panel or let a background polling loop keep the knowledge base up to date automatically.

@@ -1,7 +1,7 @@
 ---
-title: "How the Hybrid RAG Pipeline Works in NISIRA"
+title: "How NISIRA Assistant's Hybrid RAG Pipeline Works End-to-End"
 sidebarTitle: "RAG Pipeline"
-description: "NISIRA's RAG pipeline combines 60% semantic vector search with 40% lexical keyword search, query reformulation, topic filtering, and diversified result ranking."
+description: "NISIRA combines 60% semantic and 40% lexical search, query reformulation, topic filtering, and streaming LLM generation with TTFT latency tracking."
 ---
 
 The `RAGPipeline` class in `rag_system/rag_engine/pipeline.py` is the central orchestrator of NISIRA Assistant's retrieve-and-generate flow. Every user question travels through a series of coordinated steps — from conversational reformulation and hybrid document retrieval, through topic filtering and result diversification, to LLM-based answer generation with streaming latency tracking. The sections below trace that journey end-to-end.

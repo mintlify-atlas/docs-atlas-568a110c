@@ -1,5 +1,5 @@
 ---
-title: "RAG Evaluation Metrics in NISIRA Assistant"
+title: "RAG Evaluation Metrics and A/B Experiments in NISIRA"
 sidebarTitle: "Metrics & Eval"
 description: "NISIRA tracks Precision@k, Recall@k, Faithfulness, Hallucination Rate, Answer Relevancy, and WER without external APIs using a custom local evaluator."
 ---
@@ -14,13 +14,13 @@ Saved automatically after every `rag_enhanced_chat` request by `MetricsTracker.s
 
 | Field | Type | Description |
 |---|---|---|
-| `query_id` | `UUIDField` | Unique identifier for the query |
+| `query_id` | `CharField` | Unique identifier for the query |
 | `query_text` | `TextField` | Full question text |
 | `total_latency` | `FloatField` | Wall-clock time from question receipt to response complete (seconds) |
 | `time_to_first_token` | `FloatField` | Time until the first LLM token is streamed (seconds) |
 | `retrieval_time` | `FloatField` | Time spent in vector store search (seconds) |
 | `generation_time` | `FloatField` | Time spent in LLM generation (seconds) |
-| `is_complex_query` | `BooleanField` | `True` when `documents_retrieved > 0` |
+| `is_complex_query` | `BooleanField` | `True` when query is classified as complex (based on length, keywords, and question count) |
 | `query_complexity_score` | `FloatField` | Complexity score (0.0–1.0) |
 | `documents_retrieved` | `IntegerField` | Number of chunks returned by hybrid search |
 | `top_k` | `IntegerField` | The adaptive top_k value used for this query |
@@ -31,7 +31,7 @@ Created alongside `QueryMetrics` when `RAGAS_ENABLED=true` or when the custom ev
 
 | Field | Type | Description |
 |---|---|---|
-| `evaluation_id` | `UUIDField` | Unique evaluation record ID |
+| `evaluation_id` | `CharField` | Unique evaluation record ID |
 | `precision_at_k` | `FloatField` | Precision@k score (0.0–1.0) |
 | `recall_at_k` | `FloatField` | Recall@k score (0.0–1.0) |
 | `faithfulness_score` | `FloatField` | Faithfulness score (0.0–1.0) |
@@ -140,7 +140,7 @@ The `ExperimentRun` model stores the results of A/B experiments comparing config
 |---|---|
 | `baseline_*` | Metric values for the control configuration |
 | `variant_*` | Metric values for the experimental configuration |
-| `delta_*` | Computed difference: `variant − baseline` |
+| `delta_*` | Auto-computed difference `variant − baseline`; `editable=False` (set in `save()`) |
 | `guardrail_passed` | `True` if the variant meets all minimum quality thresholds |
 | `guardrail_reason` | Human-readable explanation when a guardrail fails |
 

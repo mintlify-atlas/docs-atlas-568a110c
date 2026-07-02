@@ -1,7 +1,7 @@
 ---
 title: "Document Ingestion and Processing in NISIRA Assistant"
 sidebarTitle: "Document Ingestion"
-description: "Upload and embed PDF, DOCX, PPTX, XLSX, and TXT files. NISIRA chunks documents per format, generates 768-dimensional embeddings, and stores them in pgvector or ChromaDB."
+description: "Upload PDF, DOCX, PPTX, XLSX, and TXT files into NISIRA. Each format uses dedicated chunk sizes, 768-D vector embeddings, stored in pgvector or ChromaDB."
 ---
 
 Document ingestion is the process that converts raw files into searchable vector embeddings inside NISIRA's knowledge base. Every file — whether uploaded manually through the Admin Panel or pulled automatically from Google Drive — travels through the same five-stage pipeline: parsing, format-aware chunking, embedding generation, vector storage, and metadata registration. The following sections describe each stage in detail.
@@ -92,12 +92,12 @@ Pass `force_reprocess=True` when calling `sync_and_process_documents()` programm
 |---|---|---|
 | `file_name` | `CharField` | Original filename including extension |
 | `file_path` | `CharField` | `postgres://<uuid>` or absolute local path |
-| `file_size` | `IntegerField` | File size in bytes |
-| `file_type` | `CharField` | MIME type (e.g. `application/pdf`) |
+| `file_size` | `BigIntegerField` | File size in bytes |
+| `file_type` | `CharField` | File extension (e.g. `.pdf`, `.docx`) |
 | `drive_file_id` | `CharField` | Google Drive file ID (blank for manual uploads) |
 | `processed` | `BooleanField` | Whether chunking has completed |
 | `chunks_created` | `IntegerField` | Number of text chunks generated |
-| `embeddings_generated` | `BooleanField` | Whether embeddings have been stored |
+| `embeddings_generated` | `IntegerField` | Number of embeddings stored in the vector database |
 
 ## Document Serving and PDF Deep Linking
 

@@ -1,7 +1,7 @@
 ---
-title: "NISIRA Assistant REST API Reference Overview"
+title: "NISIRA Assistant API Reference: Endpoints Overview"
 sidebarTitle: "Overview"
-description: "All API endpoints are prefixed with /api/. Authentication uses JWT Bearer tokens. Responses are JSON. Covers chat, RAG, conversations, ratings, experiments, and admin."
+description: "All /api/ endpoints return JSON. Protected routes require a JWT Bearer token. Covers chat, RAG, conversations, ratings, experiments, and admin operations."
 ---
 
 The NISIRA Assistant REST API is a Django REST Framework backend that powers a full-stack Retrieval-Augmented Generation (RAG) chat application. Every endpoint lives under the `/api/` prefix, all responses are JSON, and all protected routes require a JWT Bearer token in the `Authorization` header. The sections below describe the available resource groups, the welcome and utility endpoints, and the error conventions you should expect across the entire API surface.
@@ -147,7 +147,7 @@ The auth group (`/api/auth/`) handles user identity. All four routes accept unau
 | `GET` | `/api/rag/system-status/` | Optional | Detailed system status from the pipeline |
 
 <Note>
-  `POST /api/rag/query/` is the only RAG endpoint decorated with `AllowAny`. All other RAG endpoints require a valid Bearer token.
+  `POST /api/rag/query/` and `GET /api/rag/system-status/` are decorated with `AllowAny` — a JWT token is not enforced at the Django permission layer for these two endpoints. All other RAG endpoints require a valid Bearer token.
 </Note>
 
 ### Documents

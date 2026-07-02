@@ -1,7 +1,7 @@
 ---
-title: "RAG Pipeline Configuration Reference"
+title: "NISIRA Assistant RAG Pipeline Configuration Reference"
 sidebarTitle: "RAG Settings"
-description: "Tune retrieval behavior, chunking strategy, embedding model, and vector store backend. All settings live in rag_system/config.py and are controllable via environment variables."
+description: "Tune retrieval, chunking, embedding, and vector store settings for NISIRA Assistant. All values live in rag_system/config.py with env variable overrides."
 ---
 
 NISIRA Assistant's retrieval-augmented generation pipeline is configured through a single source of truth: `backend/rag_system/config.py`. This file defines four top-level configuration dictionaries — `RAG_CONFIG`, `DOCUMENT_PROCESSING_CONFIG`, `API_CONFIG`, and `CHROMA_CONFIG` — along with `VECTOR_STORE_CONFIG` for the storage backend. Most sensitive or deployment-specific values are read from environment variables; the rest are tuned constants you can edit directly in `config.py`. This page documents every setting and explains how each one affects retrieval quality, indexing behavior, and generation output.

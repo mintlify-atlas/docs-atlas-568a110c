@@ -1,7 +1,7 @@
 ---
 title: "Environment Variables Reference for NISIRA Assistant"
 sidebarTitle: "Env Variables"
-description: "Complete reference for all backend and frontend environment variables: Django settings, database, LLM API keys, Google Drive credentials, and Gunicorn tuning."
+description: "Complete reference for backend and frontend environment variables: Django settings, database, LLM keys, Google Drive credentials, and Gunicorn tuning."
 ---
 
 NISIRA Assistant is configured entirely through environment variables — there are no hard-coded secrets in the codebase. The backend reads a `.env` file at startup via `python-dotenv`, while the production deployment (Docker / DigitalOcean App Platform) injects variables directly into the runtime environment. The sections below document every supported variable, its default value, and when it is required.
@@ -14,6 +14,7 @@ NISIRA Assistant is configured entirely through environment variables — there 
 |---|---|---|---|
 | `SECRET_KEY` / `DJANGO_SECRET_KEY` | **Yes (prod)** | Insecure fallback | Django's cryptographic signing key. Generate a long random string for every production deployment and keep it secret. |
 | `DEBUG` | No | `True` | Set to `False` in production. When `True`, Django returns verbose error pages and disables several security hardening checks. |
+| `ENVIRONMENT` | No | — | Informational tag identifying the runtime environment. Typical values: `local` (development) and `production`. Not read by Django core settings directly, but useful for distinguishing runtime contexts in logs and deployment configs. |
 | `ALLOWED_HOSTS` | No | Auto-detected | Comma-separated list of hostnames Django will serve (e.g. `your-domain.com,www.your-domain.com,1.2.3.4`). If omitted, the backend auto-detects the environment: Heroku (`DYNO`), Railway (`RAILWAY_ENVIRONMENT_NAME`), or falls back to `localhost,127.0.0.1`. |
 | `DJANGO_SETTINGS_MODULE` | No | `core.settings` | Fully qualified settings module. Set to `core.production_settings` when deploying to DigitalOcean App Platform or any environment that uses a dedicated production settings file. |
 
@@ -109,6 +110,17 @@ Google Drive integration is **disabled by default** and must be explicitly enabl
 
 ---
 
+## Local Development Paths
+
+These variables appear in `backend/.env.local.example` as convenience hints for local development. They are not read by Django or the RAG system's Python code directly, but can be used by shell scripts or Docker Compose volume mounts to point to local data directories.
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `LOCAL_DATA_DIR` | No | `./data` | Local directory path for document storage and RAG data files during development. |
+| `LOCAL_CHROMA_DIR` | No | `./chroma_db_local` | Local directory path for the ChromaDB persistence files during development. |
+
+---
+
 ## Security (Production)
 
 These variables are only meaningful when `DEBUG=False`. They are ignored in local development.
@@ -119,14 +131,24 @@ These variables are only meaningful when `DEBUG=False`. They are ignored in loca
 | `SECURE_SSL_REDIRECT` | No | `False` | When `True`, Django redirects all HTTP requests to HTTPS. Enable in production behind an SSL terminator. |
 | `SESSION_COOKIE_SECURE` | No | `False` | When `True`, the session cookie is only sent over HTTPS connections. |
 | `CSRF_COOKIE_SECURE` | No | `False` | When `True`, the CSRF cookie is only sent over HTTPS connections. |
+| `TZ` | No | `UTC` | System timezone for the container or process. The production example uses `America/Lima`; Django's internal `TIME_ZONE` is set to `UTC` and is independent of this variable. |
 
 ---
 
 ## Frontend
 
+The frontend is a React application configured via `frontend/.env` (or `frontend/.env.example` as a template). All variables are prefixed with `REACT_APP_` to be picked up by Create React App at build time.
+
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `REACT_APP_API_URL` | **Yes** | `http://localhost:8000` | Full URL of the Django backend API. The React app prefixes all `/api/` requests with this value. In DigitalOcean App Platform, set this to `${backend.PUBLIC_URL}` so it resolves automatically. |
+| `PORT` | No | `3000` | Port the React development server listens on. Does not affect the production build. |
+| `REACT_APP_ENV` | No | `development` | Runtime environment label surfaced to client-side code. Typical values: `development`, `production`. |
+| `REACT_APP_DEBUG` | No | `true` | Enables additional client-side debug logging when `true`. Set to `false` in production builds. |
+| `REACT_APP_JWT_TOKEN_NAME` | No | `access_token` | Key name used to store the JWT access token in browser storage. |
+| `REACT_APP_JWT_REFRESH_NAME` | No | `refresh_token` | Key name used to store the JWT refresh token in browser storage. |
+| `REACT_APP_NAME` | No | `RAG Asistente` | Application display name shown in the UI title and headings. |
+| `REACT_APP_VERSION` | No | `1.0.0` | Application version string surfaced in the UI or About screen. |
 
 ---
 

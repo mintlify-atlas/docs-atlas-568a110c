@@ -1,7 +1,7 @@
 ---
 title: "Adaptive Document Retrieval: Dynamic top-k Selection"
 sidebarTitle: "Adaptive Retrieval"
-description: "NISIRA dynamically computes top-k (3–15) for each query based on length, question count, and complexity keywords — ensuring efficient retrieval without sacrificing coverage."
+description: "NISIRA computes top-k (min 3, max 15) per query from character length, question count, and complexity keywords to match retrieval depth to query needs."
 ---
 
 NISIRA's retrieval system does not use a fixed number of documents for every query. Instead, the `calculate_adaptive_top_k()` function in `api/views.py` analyses each incoming question and computes an appropriate `top_k` value — the number of document chunks to retrieve — before the RAG pipeline even starts. This keeps simple questions lean and ensures complex, multi-part queries receive the breadth of context they require.
@@ -77,12 +77,12 @@ calculate_adaptive_top_k("¿Qué es ISO 27001?")
 calculate_adaptive_top_k("Explica detalladamente los principios de ISO 27001")
 # → 5 (base) + 1 (keyword) = 6
 
-# Complex multi-question query
+# Complex multi-question query (length ≈ 111 chars → 100–149 range)
 calculate_adaptive_top_k(
     "¿Por qué es importante implementar ISO 27001? "
     "¿Cómo se relaciona con GDPR? ¿Qué controles son necesarios?"
 )
-# → 9 (base ≥150 chars) + 4 (3×?) + 3 (3 keywords) = 16 → capped to 15
+# → 7 (base 100–149 chars) + 4 (3×?) + 2 (2 keywords: "por qué", "implementar") = 13
 ```
 
 ## Integration Points

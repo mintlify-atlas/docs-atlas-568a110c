@@ -1,7 +1,7 @@
 ---
-title: "Deploy NISIRA Assistant with Docker Compose"
+title: "Deploy NISIRA Assistant with Docker Compose (Dev + Prod)"
 sidebarTitle: "Docker"
-description: "Run NISIRA Assistant locally with docker-compose.yml (MySQL) or in production with docker-compose.production.yml (PostgreSQL + pgvector + Nginx reverse proxy)."
+description: "Run NISIRA Assistant locally with docker-compose.yml (MySQL) or in production with docker-compose.production.yml (PostgreSQL + pgvector + Nginx)."
 ---
 
 NISIRA Assistant ships with two Docker Compose configurations: a development stack backed by MySQL for local experimentation, and a production stack using PostgreSQL with the `pgvector` extension, a dedicated Nginx reverse proxy, and hardened Django settings. Both stacks share the same backend and frontend images, so you build once and promote the same artifact from local to production.
@@ -26,11 +26,11 @@ The development stack spins up three services: a **MySQL 8.0** database, the **D
 
 ### Services at a glance
 
-| Service    | Image / Build           | Port mapping  |
-|------------|-------------------------|---------------|
-| `db`       | `mysql:8.0`             | `3306:3306`   |
-| `backend`  | `./backend` (Dockerfile)| `8000:8000`   |
-| `frontend` | `./frontend` (Dockerfile)| `3000:80`    |
+| Service    | Image / Build            | Port mapping  |
+|------------|--------------------------|---------------|
+| `db`       | `mysql:8.0`              | `3306:3306`   |
+| `backend`  | `./backend` (Dockerfile) | `8000:8000`   |
+| `frontend` | `./frontend` (Dockerfile)| `3000:80`     |
 
 ### Required environment variables
 
@@ -122,12 +122,12 @@ The production stack replaces MySQL with **PostgreSQL 16 + pgvector**, hardens t
 
 ### Services at a glance
 
-| Service    | Image / Build                        | Notes                              |
-|------------|--------------------------------------|------------------------------------|
-| `db`       | `pgvector/pgvector:pg16`             | Built-in health check via `pg_isready` |
-| `backend`  | `./backend` (Dockerfile)             | Waits for `db` to be healthy       |
-| `frontend` | `./frontend` (Dockerfile)            | Built with `REACT_APP_API_URL` arg |
-| `nginx`    | `nginx:1.27-alpine`                  | Binds ports `80` and `443`         |
+| Service    | Image / Build                        | Notes                                      |
+|------------|--------------------------------------|--------------------------------------------|
+| `db`       | `pgvector/pgvector:pg16`             | Built-in health check via `pg_isready`     |
+| `backend`  | `./backend` (Dockerfile)             | Waits for `db` to be healthy               |
+| `frontend` | `./frontend` (Dockerfile)            | Built with `REACT_APP_API_URL` build arg   |
+| `nginx`    | `nginx:1.27-alpine`                  | Binds ports `80` and `443`                 |
 
 All services share the `nisira-network` bridge network, and the Nginx configuration at `./nginx/nginx.conf` is mounted read-only.
 
@@ -274,14 +274,25 @@ CMD ["sh", "-c", \
 
 ## Persistent Volume Mounts
 
-Both Compose files mount directories on the host into the backend container so that uploaded documents and vector embeddings survive container restarts:
+Both Compose files persist the backend's document store and vector database across container restarts, but they use different volume strategies.
 
-| Host path               | Container path     | Purpose                            |
-|-------------------------|--------------------|------------------------------------|
-| `./backend/data`        | `/app/data`        | Uploaded and processed documents   |
-| `./backend/chroma_db`   | `/app/chroma_db`   | ChromaDB vector store              |
+**Development (`docker-compose.yml`) — bind mounts:**
 
-In production, these are managed as named Docker volumes (`rag_data`, `chroma_data`) rather than bind mounts:
+| Host path             | Container path  | Purpose                          |
+|-----------------------|-----------------|----------------------------------|
+| `./backend/data`      | `/app/data`     | Uploaded and processed documents |
+| `./backend/chroma_db` | `/app/chroma_db`| ChromaDB vector store            |
+
+Bind mounts make the data directly accessible on the host, which is convenient for local development and debugging.
+
+**Production (`docker-compose.production.yml`) — named volumes:**
+
+| Volume name  | Container path  | Purpose                          |
+|--------------|-----------------|----------------------------------|
+| `rag_data`   | `/app/data`     | Uploaded and processed documents |
+| `chroma_data`| `/app/chroma_db`| ChromaDB vector store            |
+
+Named volumes are managed entirely by Docker and are not exposed as host-path directories. They survive container restarts and replacements, and they perform better on Linux hosts than bind mounts.
 
 ```yaml
 volumes:

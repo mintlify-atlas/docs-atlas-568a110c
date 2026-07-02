@@ -1,7 +1,7 @@
 ---
-title: "Configure LLM Providers in NISIRA Assistant"
+title: "NISIRA Assistant LLM Providers Configuration Guide"
 sidebarTitle: "LLM Providers"
-description: "Set up Gemini 2.0 Flash, OpenRouter, or Groq as the generation backend. Switch providers with a single environment variable and configure model, tokens, and temperature."
+description: "Configure Gemini, OpenRouter, or Groq as the RAG generation backend. Switch providers with one env variable and tune model, temperature, and token limits."
 ---
 
 NISIRA Assistant's RAG pipeline supports three LLM providers — Google Gemini, OpenRouter, and Groq — and lets you switch between them with a single environment variable. All provider configuration lives in `backend/rag_system/config.py` under the `RAG_CONFIG['generation']` dictionary, with every sensitive value read from environment variables at startup. The generation stage wraps retrieved context into a structured academic-assistant prompt before calling the configured provider.

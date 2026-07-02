@@ -45,6 +45,7 @@ This guide walks you through cloning the repository, configuring the required en
     ALLOWED_HOSTS=localhost,127.0.0.1
 
     # Database (matches docker-compose.yml defaults)
+    DB_ENGINE=mysql
     DB_NAME=rag_asistente
     DB_USER=root
     DB_PASSWORD=sistemas
@@ -87,10 +88,10 @@ This guide walks you through cloning the repository, configuring the required en
     | `backend`  | 8000 | Django REST API + RAG pipeline     |
     | `frontend` | 3000 | React SPA (served via Nginx)       |
 
-    Wait until you see log output from the backend indicating that migrations have run and the development server is listening:
+    Wait until you see log output from the backend indicating that migrations have run and Gunicorn is listening:
 
     ```
-    backend  | Starting development server at http://0.0.0.0:8000/
+    backend  | [INFO] Launching Gunicorn on port 8000
     ```
 
     <Info>
@@ -105,7 +106,7 @@ This guide walks you through cloning the repository, configuring the required en
     docker compose exec backend python manage.py create_admin_user
     ```
 
-    The command creates a superuser with username `admin` and prints the generated password to stdout. Save it — you will need it in the next step.
+    The command creates a superuser with username `admin` and password `admin123`. If the `admin` user already exists, the command resets the password to `admin123` and ensures the account has superuser privileges.
 
     <Tip>
       You can also use the standard Django superuser command: `docker compose exec backend python manage.py createsuperuser`

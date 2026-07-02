@@ -76,10 +76,10 @@ Query performance data is stored in the `QueryMetrics` model and aggregated on d
 
 | Metric | Source field | Unit | Description |
 |--------|-------------|------|-------------|
-| **Latencia promedio** (`latenciaTotal`) | `total_latency` | seconds | Average wall-clock time from query receipt to full response, calculated as `end_time − start_time` using `time.time()` |
-| **Velocidad** (`reduccionTiempo`) | derived | tokens/second | Response token count divided by total latency |
-| **Calidad RAGAS** (`calidadRespuesta`) | `faithfulness_score` + `answer_relevancy` | 0–1 | Composite quality score from the custom evaluator |
-| **Total queries** | `totalQueries` | count | Total recorded queries in the database |
+| **Latencia promedio** (`latenciaTotal`) | `QueryMetrics.total_latency` | seconds | Average wall-clock time from query receipt to full response, calculated as `end_time − start_time` using `time.time()` |
+| **Velocidad** (`reduccionTiempo`) | derived from `RAGASMetrics.response_text` / `total_latency` | tokens/second | Average response token count divided by total latency across all recorded queries |
+| **Calidad RAGAS** (`calidadRespuesta`) | `RAGASMetrics.wer_score` | 0–1 | Composite RAGAS quality score stored in the `wer_score` field by the custom evaluator |
+| **Total queries** (`totalQueries`) | `QueryMetrics` row count | count | Total recorded queries in the database |
 
 The `QueryMetrics` model also tracks `time_to_first_token`, `retrieval_time`, `generation_time`, `documents_retrieved`, `is_complex_query`, and `query_complexity_score`. All of these are accessible per-query through the query detail endpoint.
 
@@ -111,17 +111,18 @@ Authorization: Bearer <admin_token>
 {
   "success": true,
   "metrics": {
-    "performance": {
-      "avgResponseTime": 2.34,
-      "timeToFirstToken": 0.45,
-      "totalQueries": 156
-    },
-    "precision": {
-      "precisionAtK": 0.85,
-      "faithfulness": 0.92,
-      "hallucinationRate": 0.08
+    "latenciaTotal": 2.34,
+    "reduccionTiempo": 45.7,
+    "calidadRespuesta": 0.87,
+    "totalQueries": 156,
+    "metadata": {
+      "lastUpdated": "2025-01-14T03:50:00.123456",
+      "dataSource": "real_database_ragas_gemini",
+      "isRealData": true,
+      "description": "3 métricas finales: Latencia Total, Reducción de Tiempo, Calidad de Respuesta (RAGAS con Gemini)"
     }
-  }
+  },
+  "message": "Métricas reales obtenidas: 156 consultas"
 }
 ```
 
@@ -201,7 +202,7 @@ A `guardrail_passed: false` response means either the last experiment was blocke
 
 ## Direct model inspection
 
-For ad-hoc queries against the raw metric tables, use the Django admin at `/django-admin/`. The models `api | Query metrics` and `api | RAGAS metrics` are both registered and searchable. You can also query the database directly:
+For ad-hoc queries against the raw metric tables, use the Django admin at `/admin/`. The models `api | Query metrics` and `api | RAGAS metrics` are both registered and searchable. You can also query the database directly:
 
 ```python
 from django.db.models import Avg

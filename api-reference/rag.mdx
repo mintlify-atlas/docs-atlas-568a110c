@@ -1,7 +1,7 @@
 ---
 title: "RAG System API: Pipeline Control and Direct Querying"
 sidebarTitle: "RAG"
-description: "Initialize the RAG pipeline, sync documents, run direct queries, and check system status via the /api/rag/ endpoints. All require JWT authentication."
+description: "Sync Drive docs, query the vector store, and check pipeline health via /api/rag/. JWT required for most routes; rag/query and rag/system-status are public."
 ---
 
 The RAG (Retrieval-Augmented Generation) System API exposes low-level control over the NISIRA pipeline: checking readiness, triggering document synchronization from Google Drive, and running queries directly against the vector store with fine-grained parameter control. These endpoints are distinct from `POST /api/chat/` — they bypass conversation persistence and are better suited for testing, evaluation scripts, and the admin panel. Unless noted, all endpoints require a valid JWT Bearer token.
@@ -193,10 +193,6 @@ Runs a direct RAG query outside of any conversation context. Useful for evaluati
   When `true`, passes the retrieved context to the LLM and returns a natural-language answer. When `false`, returns only the retrieved chunks without generating a response.
 </ParamField>
 
-<ParamField body="collect_metrics" type="boolean">
-  When `true`, the system records `QueryMetrics` and `RAGASMetrics` records in the database for later analysis via the admin metrics endpoints.
-</ParamField>
-
 ### Response
 
 <ResponseField name="question" type="string">
@@ -264,7 +260,7 @@ Runs a direct RAG query outside of any conversation context. Useful for evaluati
 
 ## POST /api/rag/chat/
 
-An enhanced chat endpoint that integrates the full RAG pipeline with conversation history support. Unlike `POST /api/chat/`, this endpoint accepts an explicit `history` array so you can pass conversation context from any source (not just stored DB messages). It also auto-creates a new conversation if `conversation_id` is omitted, and falls back gracefully to the basic chat handler if the RAG modules are unavailable. Requires JWT authentication.
+An enhanced chat endpoint that integrates the full RAG pipeline with automatic conversation history support. Unlike `POST /api/chat/`, this endpoint retrieves the 6 most recent messages from the conversation and passes them as context to the LLM, producing richer grounded answers. It auto-creates a new conversation if `conversation_id` is omitted, and falls back gracefully to the basic chat handler if the RAG modules are unavailable. Returns **`201 Created`** on success. Requires JWT authentication.
 
 <Note>
   For most frontend integrations, `POST /api/rag/chat/` is the recommended endpoint. It provides richer metrics tracking (via `MetricsTracker`) compared to `POST /api/chat/`, which uses a simpler response generation path.
@@ -280,13 +276,13 @@ An enhanced chat endpoint that integrates the full RAG pipeline with conversatio
   Slug or legacy numeric ID of an existing conversation. If omitted, a new conversation is created automatically with the message content as the title (truncated to 50 characters).
 </ParamField>
 
-<ParamField body="history" type="array">
-  Optional explicit conversation history to pass to the LLM. Each element is an object with `role` (`"user"` or `"assistant"`) and `content` (string). When `conversation_id` is provided and `history` is omitted, the backend automatically loads the 6 most recent messages from that conversation.
+<ParamField body="use_rag" type="boolean" default="true">
+  Set to `false` to bypass the RAG pipeline and use the basic keyword-based response generator. Automatically set to `false` for short greetings (30 characters or fewer) to avoid unnecessary retrieval.
 </ParamField>
 
-<ParamField body="use_rag" type="boolean" default="true">
-  Set to `false` to bypass the RAG pipeline and use the basic keyword-based response generator. Automatically set to `false` for short greetings (under 30 characters) to avoid unnecessary retrieval.
-</ParamField>
+<Note>
+  Conversation history is built automatically by the backend — the 6 most recent messages from the conversation are retrieved from the database and passed to the LLM as context. There is no `history` request body parameter.
+</Note>
 
 ### Response
 
@@ -334,7 +330,11 @@ curl -X POST https://your-domain.com/api/rag/chat/ \
 
 ## GET /api/rag/system-status/
 
-Returns a detailed diagnostic snapshot of the RAG pipeline by calling `pipeline.get_system_status()`. This is a more verbose version of `GET /api/rag/status/` that exposes internal component metadata. Requires JWT authentication (`AllowAny` in the source — same note as `/api/rag/query/`).
+Returns a detailed diagnostic snapshot of the RAG pipeline by calling `pipeline.get_system_status()`. This is a more verbose version of `GET /api/rag/status/` that exposes internal component metadata.
+
+<Note>
+  This endpoint has `AllowAny` permission — a JWT token is not enforced at the Django permission layer. Best practice is to supply the `Authorization` header in production environments.
+</Note>
 
 ### Response
 

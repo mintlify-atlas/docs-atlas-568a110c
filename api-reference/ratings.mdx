@@ -1,5 +1,5 @@
 ---
-title: "Ratings API: Collect User Feedback on Responses"
+title: "NISIRA Ratings API: Collect Feedback on Bot Responses"
 sidebarTitle: "Ratings"
 description: "Submit like/dislike ratings with optional issue tags and comments. Retrieve aggregate summaries or export raw rating data as JSON or CSV."
 ---
@@ -303,11 +303,12 @@ curl -X GET https://your-domain.com/api/experiments/latest/ \
 
 ### POST /api/experiments/create/
 
-Creates a new experiment run record and automatically evaluates it against configurable guardrail thresholds. If any delta (precision, faithfulness, or latency) breaches its threshold, `guardrail_passed` is set to `false` and `guardrail_reason` is populated.
+Creates a new experiment run record and automatically evaluates it against configurable guardrail thresholds. If any delta (precision, faithfulness, or latency) breaches its threshold, `guardrail_passed` is set to `false` and `guardrail_reason` is populated. Returns **`201 Created`** on success.
 
 <ParamField body="name" type="string" required>Name of the experiment.</ParamField>
 <ParamField body="variant_name" type="string" required>Name of the variant being tested.</ParamField>
 <ParamField body="executed_by" type="string" required>Who ran the experiment.</ParamField>
+<ParamField body="notes" type="string">Optional free-text notes about the run.</ParamField>
 <ParamField body="baseline_precision" type="float" required>Baseline Precision@k score (0–1).</ParamField>
 <ParamField body="variant_precision" type="float" required>Variant Precision@k score (0–1).</ParamField>
 <ParamField body="baseline_faithfulness" type="float" required>Baseline faithfulness score (0–1).</ParamField>
@@ -317,6 +318,23 @@ Creates a new experiment run record and automatically evaluates it against confi
 <ParamField body="guardrail_threshold_precision" type="float" default="-0.01">Minimum acceptable delta precision. Experiments with lower deltas are blocked.</ParamField>
 <ParamField body="guardrail_threshold_faithfulness" type="float" default="-0.01">Minimum acceptable delta faithfulness.</ParamField>
 <ParamField body="guardrail_threshold_latency" type="float" default="0.3">Maximum acceptable latency increase in seconds.</ParamField>
+
+```bash
+curl -X POST https://your-domain.com/api/experiments/create/ \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "top_k_ablation_v2",
+    "variant_name": "top_k_10",
+    "executed_by": "hugo_dev",
+    "baseline_precision": 0.71,
+    "variant_precision": 0.74,
+    "baseline_faithfulness": 0.83,
+    "variant_faithfulness": 0.85,
+    "baseline_latency": 2.4,
+    "variant_latency": 2.6
+  }'
+```
 
 ### GET /api/guardrails/status/
 

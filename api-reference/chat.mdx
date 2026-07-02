@@ -1,17 +1,17 @@
 ---
-title: "Chat API: Send Messages to the RAG Assistant"
+title: "NISIRA Assistant Chat API: Send and Receive Messages"
 sidebarTitle: "Chat"
-description: "POST /api/chat/ to send a message. The backend runs the full RAG pipeline and returns an answer with source citations. Requires JWT authentication."
+description: "POST /api/chat/ appends a message to an existing conversation and returns a keyword-based reply. Use POST /api/rag/chat/ for document-backed RAG responses."
 ---
 
-The Chat API is the primary entry point for user interactions with the NISIRA Assistant. When a message is submitted, the backend calculates an adaptive top-k retrieval depth based on the complexity and length of the question, retrieves the most relevant document chunks from the vector store, and streams a grounded LLM-generated answer back alongside source citations. All requests require a valid JWT Bearer token.
+The Chat API provides two entry points for user–assistant interactions. `POST /api/chat/` is the basic endpoint that routes messages through a keyword-response generator without document retrieval — it is lightweight, fast, and suitable for simple exchanges like greetings. For full Retrieval-Augmented Generation with document citations and adaptive context retrieval, use `POST /api/rag/chat/` (documented in the [RAG section](/api-reference/rag)). Both endpoints require a valid JWT Bearer token and scope all messages to the authenticated user's conversations.
 
 ## POST /api/chat/
 
-Send a user message and receive an AI-generated response backed by the RAG pipeline. If no `conversation_id` is provided, a new conversation is automatically created and its slug is returned in the response.
+Send a user message to an existing conversation and receive a basic assistant reply. The `conversation_id` field is required — this endpoint does not auto-create conversations. To start a new thread first, call `POST /api/conversations/create/` and then use the returned slug here.
 
 <Note>
-  The retrieval depth is automatically determined by `calculate_adaptive_top_k()`. Short queries (under 50 characters) retrieve 3–5 documents; long or multi-question queries can retrieve up to 12–15 documents. You can override this on the RAG query endpoint using an explicit `top_k` parameter.
+  `POST /api/chat/` uses a keyword-based response generator (`generate_basic_response`), not the RAG pipeline. It does not retrieve documents or produce citations. Use `POST /api/rag/chat/` for grounded, document-backed answers.
 </Note>
 
 ### Request
@@ -21,67 +21,95 @@ Send a user message and receive an AI-generated response backed by the RAG pipel
 **Authentication:** `Authorization: Bearer <access_token>`
 
 <ParamField body="content" type="string" required>
-  The user's question or message. Must be a non-empty string. Whitespace is stripped automatically.
+  The user's question or message. Must be a non-empty string. Leading and trailing whitespace is stripped automatically.
 </ParamField>
 
-<ParamField body="conversation_id" type="string">
-  The slug (preferred) or legacy numeric ID of an existing conversation to append the message to. Pass `null` or omit this field to start a new conversation automatically.
+<ParamField body="conversation_id" type="string" required>
+  The slug (preferred) or legacy numeric ID of an existing conversation to append the message to. This field is required — omitting it returns `400 Bad Request`.
 </ParamField>
 
 ### Response
 
-<ResponseField name="message_id" type="integer">
-  The database ID of the saved bot `Message` record. Use this ID to submit a rating via `POST /api/ratings/`.
+<ResponseField name="user_message" type="object">
+  The saved user message record.
+
+  <Expandable title="user_message fields">
+    <ResponseField name="id" type="integer">
+      Database ID of the user `Message` record.
+    </ResponseField>
+    <ResponseField name="content" type="string">
+      The message text as stored (same as the submitted `content`).
+    </ResponseField>
+    <ResponseField name="is_user" type="boolean">
+      Always `true` for the user message.
+    </ResponseField>
+    <ResponseField name="timestamp" type="string">
+      ISO 8601 creation timestamp.
+    </ResponseField>
+    <ResponseField name="rating" type="null">
+      Always `null` — user messages cannot be rated.
+    </ResponseField>
+    <ResponseField name="rating_issue_tag" type="string">
+      Always `"none"` for the user message.
+    </ResponseField>
+  </Expandable>
 </ResponseField>
 
-<ResponseField name="response" type="string">
-  The assistant's answer in markdown format, grounded in the retrieved document chunks.
+<ResponseField name="assistant_message" type="object">
+  The saved assistant reply record.
+
+  <Expandable title="assistant_message fields">
+    <ResponseField name="id" type="integer">
+      Database ID of the bot `Message` record. Use this ID to submit a rating via `POST /api/ratings/`.
+    </ResponseField>
+    <ResponseField name="content" type="string">
+      The assistant's reply text.
+    </ResponseField>
+    <ResponseField name="is_user" type="boolean">
+      Always `false` for the assistant message.
+    </ResponseField>
+    <ResponseField name="timestamp" type="string">
+      ISO 8601 creation timestamp.
+    </ResponseField>
+    <ResponseField name="rating" type="null">
+      `null` immediately after creation (no rating submitted yet).
+    </ResponseField>
+    <ResponseField name="rating_issue_tag" type="string">
+      `"none"` immediately after creation.
+    </ResponseField>
+  </Expandable>
 </ResponseField>
 
 <ResponseField name="conversation_id" type="string">
   URL-safe slug of the conversation (11 characters, randomly generated). Always prefer this over the numeric ID for subsequent requests.
 </ResponseField>
 
-<ResponseField name="sources" type="array">
-  List of source document citations used to generate the answer.
-
-  <Expandable title="Source object fields">
-    <ResponseField name="title" type="string">
-      Human-readable title of the source document.
-    </ResponseField>
-    <ResponseField name="filename" type="string">
-      The document's slug/filename as stored in the system. Pass this to `GET /api/documents/<filename>/` to retrieve the file.
-    </ResponseField>
-    <ResponseField name="page_number" type="integer">
-      Page number within the document where the cited content was found.
-    </ResponseField>
-    <ResponseField name="score" type="float">
-      Semantic similarity score for this chunk (higher is more relevant).
-    </ResponseField>
-    <ResponseField name="document_id" type="string">
-      Internal document identifier in the vector store.
-    </ResponseField>
-  </Expandable>
+<ResponseField name="numeric_id" type="integer">
+  Legacy numeric primary key of the conversation.
 </ResponseField>
 
-<ResponseField name="top_k_used" type="integer">
-  The number of document chunks that were retrieved for this query. Reflects the adaptive top-k calculation.
+<ResponseField name="slug" type="string">
+  Same as `conversation_id` — the conversation's public slug.
 </ResponseField>
 
-<ResponseField name="latency" type="float">
-  Total end-to-end response time in seconds, from request receipt to response serialization.
-</ResponseField>
+### Error Responses
+
+| HTTP | `error` value |
+|---|---|
+| `400` | `"El mensaje no puede estar vacío"` |
+| `400` | `"ID de conversación requerido"` |
+| `404` | `"Conversación no encontrada"` |
 
 ### Example
 
 <Tabs>
   <Tab title="cURL">
     ```bash
-    curl -X POST https://your-domain.com/api/chat/ \
+    curl -X POST http://localhost:8000/api/chat/ \
       -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
       -H "Content-Type: application/json" \
       -d '{
-        "content": "¿Cuáles son los requisitos para solicitar una licencia de construcción?",
+        "content": "Hola, ¿cómo estás?",
         "conversation_id": "aB3dEfGhIjK"
       }'
     ```
@@ -89,27 +117,25 @@ Send a user message and receive an AI-generated response backed by the RAG pipel
   <Tab title="Response">
     ```json
     {
-      "message_id": 482,
-      "response": "Para solicitar una licencia de construcción debe presentar los siguientes documentos:\n\n1. **Formulario de solicitud** debidamente completado...",
+      "user_message": {
+        "id": 481,
+        "content": "Hola, ¿cómo estás?",
+        "is_user": true,
+        "timestamp": "2024-11-10T14:22:05.123Z",
+        "rating": null,
+        "rating_issue_tag": "none"
+      },
+      "assistant_message": {
+        "id": 482,
+        "content": "¡Hola! Soy tu asistente virtual. ¿En qué puedo ayudarte hoy?",
+        "is_user": false,
+        "timestamp": "2024-11-10T14:22:05.456Z",
+        "rating": null,
+        "rating_issue_tag": "none"
+      },
       "conversation_id": "aB3dEfGhIjK",
-      "sources": [
-        {
-          "title": "Reglamento de Construcciones Municipales",
-          "filename": "reglamento_construccion_2024.pdf",
-          "page_number": 14,
-          "score": 0.91,
-          "document_id": "doc_8f2a1b"
-        },
-        {
-          "title": "Guía de Trámites Municipales",
-          "filename": "guia_tramites.pdf",
-          "page_number": 3,
-          "score": 0.87,
-          "document_id": "doc_3c9e2d"
-        }
-      ],
-      "top_k_used": 7,
-      "latency": 2.34
+      "numeric_id": 47,
+      "slug": "aB3dEfGhIjK"
     }
     ```
   </Tab>
@@ -119,7 +145,7 @@ Send a user message and receive an AI-generated response backed by the RAG pipel
 
 ## GET /api/documents/\<filename\>/
 
-Serves the raw binary file for a document stored in the system — used by the frontend PDF viewer to display the source cited in a chat response. The `filename` path parameter is the document's **slug** (as returned in the `sources[].filename` field), not the original upload filename.
+Serves the raw binary file for a document stored in the system — used by the frontend PDF viewer to display a source cited in a chat response. The `filename` path parameter is the document's filename as stored in the system (as returned in the `sources[].filename` field of `POST /api/rag/chat/` responses).
 
 **Authentication:** This endpoint accepts the JWT token either via the standard `Authorization: Bearer <token>` header **or** via a `?token=<token>` query parameter. The query-parameter method is required for browser `<iframe>` PDF embeds, which cannot send custom headers.
 
@@ -133,7 +159,7 @@ Serves the raw binary file for a document stored in the system — used by the f
   <Tab title="Header auth (cURL)">
     ```bash
     curl -X GET \
-      "https://your-domain.com/api/documents/reglamento_construccion_2024.pdf" \
+      "http://localhost:8000/api/documents/reglamento_construccion_2024.pdf/" \
       -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
       --output reglamento.pdf
     ```
@@ -141,7 +167,7 @@ Serves the raw binary file for a document stored in the system — used by the f
   <Tab title="Query param (iframe)">
     ```html
     <iframe
-      src="https://your-domain.com/api/documents/reglamento_construccion_2024.pdf?token=eyJhbGci...#page=14"
+      src="http://localhost:8000/api/documents/reglamento_construccion_2024.pdf/?token=eyJhbGci...#page=14"
       width="100%"
       height="600px"
     />
